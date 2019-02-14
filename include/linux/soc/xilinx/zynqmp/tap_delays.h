@@ -1,7 +1,7 @@
 /*
  * Xilinx Zynq MPSoC Power Management
  *
- *  Copyright (C) 2016 Xilinx
+ *  Copyright (C) 2016 - 2018, Xilinx, Inc.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,15 +17,16 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <linux/soc/xilinx/zynqmp/firmware.h>
+#include <linux/firmware/xilinx/zynqmp/firmware.h>
 
-#ifdef CONFIG_SOC_XILINX_ZYNQMP
+#ifdef CONFIG_ARCH_ZYNQMP
 /* API for programming the tap delays */
-void arasan_zynqmp_set_tap_delay(u8 deviceid, u8 timing, u8 bank);
+void arasan_zynqmp_set_tap_delay(u8 deviceid, u8 itap_delay, u8 otap_delay);
 
 /* API to reset the DLL */
 void zynqmp_dll_reset(u8 deviceid);
 #else
-inline void arasan_zynqmp_set_tap_delay(u8 deviceid, u8 timing, u8 bank) {}
+inline void arasan_zynqmp_set_tap_delay(u8 deviceid, u8 itap_delay,
+					u8 otap_delay) {}
 inline void zynqmp_dll_reset(u8 deviceid) {}
 #endif

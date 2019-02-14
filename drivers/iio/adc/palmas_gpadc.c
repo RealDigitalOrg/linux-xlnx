@@ -430,7 +430,6 @@ out:
 
 static const struct iio_info palmas_gpadc_iio_info = {
 	.read_raw = palmas_gpadc_read_raw,
-	.driver_module = THIS_MODULE,
 };
 
 #define PALMAS_ADC_CHAN_IIO(chan, _type, chan_info)	\
@@ -775,7 +774,7 @@ static int palmas_adc_wakeup_reset(struct palmas_gpadc *adc)
 
 static int palmas_gpadc_suspend(struct device *dev)
 {
-	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct palmas_gpadc *adc = iio_priv(indio_dev);
 	int wakeup = adc->wakeup1_enable || adc->wakeup2_enable;
 	int ret;
@@ -798,7 +797,7 @@ static int palmas_gpadc_suspend(struct device *dev)
 
 static int palmas_gpadc_resume(struct device *dev)
 {
-	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
+	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct palmas_gpadc *adc = iio_priv(indio_dev);
 	int wakeup = adc->wakeup1_enable || adc->wakeup2_enable;
 	int ret;

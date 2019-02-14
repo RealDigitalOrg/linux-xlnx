@@ -250,15 +250,10 @@ int yama_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 		} else {
 			struct task_struct *tracer;
 
-			rcu_read_lock();
-			tracer = find_task_by_vpid(arg2);
-			if (tracer)
-				get_task_struct(tracer);
-			else
+			tracer = find_get_task_by_vpid(arg2);
+			if (!tracer) {
 				rc = -EINVAL;
-			rcu_read_unlock();
-
-			if (tracer) {
+			} else {
 				rc = yama_ptracer_add(tracer, myself);
 				put_task_struct(tracer);
 			}
@@ -309,7 +304,7 @@ static int task_is_descendant(struct task_struct *parent,
  * @tracer: the task_struct of the process attempting ptrace
  * @tracee: the task_struct of the process to be ptraced
  *
- * Returns 1 if tracer has is ptracer exception ancestor for tracee.
+ * Returns 1 if tracer has a ptracer exception ancestor for tracee.
  */
 static int ptracer_exception_found(struct task_struct *tracer,
 				   struct task_struct *tracee)
@@ -320,6 +315,18 @@ static int ptracer_exception_found(struct task_struct *tracer,
 	bool found = false;
 
 	rcu_read_lock();
+
+	/*
+	 * If there's already an active tracing relationship, then make an
+	 * exception for the sake of other accesses, like process_vm_rw().
+	 */
+	parent = ptrace_parent(tracee);
+	if (parent != NULL && same_thread_group(parent, tracer)) {
+		rc = 1;
+		goto unlock;
+	}
+
+	/* Look for a PR_SET_PTRACER relationship. */
 	if (!thread_group_leader(tracee))
 		tracee = rcu_dereference(tracee->group_leader);
 	list_for_each_entry_rcu(relation, &ptracer_relations, node) {
@@ -334,6 +341,8 @@ static int ptracer_exception_found(struct task_struct *tracer,
 
 	if (found && (parent == NULL || task_is_descendant(parent, tracer)))
 		rc = 1;
+
+unlock:
 	rcu_read_unlock();
 
 	return rc;
@@ -414,7 +423,7 @@ int yama_ptrace_traceme(struct task_struct *parent)
 	return rc;
 }
 
-static struct security_hook_list yama_hooks[] = {
+static struct security_hook_list yama_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(ptrace_access_check, yama_ptrace_access_check),
 	LSM_HOOK_INIT(ptrace_traceme, yama_ptrace_traceme),
 	LSM_HOOK_INIT(task_prctl, yama_task_prctl),
@@ -471,6 +480,6 @@ static inline void yama_init_sysctl(void) { }
 void __init yama_add_hooks(void)
 {
 	pr_info("Yama: becoming mindful.\n");
-	security_add_hooks(yama_hooks, ARRAY_SIZE(yama_hooks));
+	security_add_hooks(yama_hooks, ARRAY_SIZE(yama_hooks), "yama");
 	yama_init_sysctl();
 }

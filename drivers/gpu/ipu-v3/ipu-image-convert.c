@@ -227,6 +227,12 @@ static const struct ipu_image_pixfmt image_convert_formats[] = {
 		.fourcc	= V4L2_PIX_FMT_BGR32,
 		.bpp    = 32,
 	}, {
+		.fourcc	= V4L2_PIX_FMT_XRGB32,
+		.bpp    = 32,
+	}, {
+		.fourcc	= V4L2_PIX_FMT_XBGR32,
+		.bpp    = 32,
+	}, {
 		.fourcc	= V4L2_PIX_FMT_YUYV,
 		.bpp    = 16,
 		.uv_width_dec = 2,
@@ -671,7 +677,12 @@ static void init_idmac_channel(struct ipu_image_convert_ctx *ctx,
 	ipu_ic_task_idma_init(chan->ic, channel, width, height,
 			      burst_size, rot_mode);
 
-	ipu_cpmem_set_axi_id(channel, 1);
+	/*
+	 * Setting a non-zero AXI ID collides with the PRG AXI snooping, so
+	 * only do this when there is no PRG present.
+	 */
+	if (!channel->ipu->prg_priv)
+		ipu_cpmem_set_axi_id(channel, 1);
 
 	ipu_idmac_set_double_buffer(channel, ctx->double_buffering);
 }

@@ -277,7 +277,7 @@ static int __init amd_power_pmu_init(void)
 	int ret;
 
 	if (!x86_match_cpu(cpu_match))
-		return 0;
+		return -ENODEV;
 
 	if (!boot_cpu_has(X86_FEATURE_ACC_POWER))
 		return -ENODEV;
@@ -291,7 +291,7 @@ static int __init amd_power_pmu_init(void)
 
 
 	cpuhp_setup_state(CPUHP_AP_PERF_X86_AMD_POWER_ONLINE,
-			  "AP_PERF_X86_AMD_POWER_ONLINE",
+			  "perf/x86/amd/power:online",
 			  power_cpu_init, power_cpu_exit);
 
 	ret = perf_pmu_register(&pmu_class, "power", -1);

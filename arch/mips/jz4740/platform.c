@@ -88,27 +88,6 @@ struct platform_device jz4740_mmc_device = {
 	.resource	= jz4740_mmc_resources,
 };
 
-/* RTC controller */
-static struct resource jz4740_rtc_resources[] = {
-	{
-		.start	= JZ4740_RTC_BASE_ADDR,
-		.end	= JZ4740_RTC_BASE_ADDR + 0x38 - 1,
-		.flags	= IORESOURCE_MEM,
-	},
-	{
-		.start	= JZ4740_IRQ_RTC,
-		.end	= JZ4740_IRQ_RTC,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-struct platform_device jz4740_rtc_device = {
-	.name		= "jz4740-rtc",
-	.id		= -1,
-	.num_resources	= ARRAY_SIZE(jz4740_rtc_resources),
-	.resource	= jz4740_rtc_resources,
-};
-
 /* I2C controller */
 static struct resource jz4740_i2c_resources[] = {
 	{
@@ -252,22 +231,6 @@ struct platform_device jz4740_adc_device = {
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(jz4740_adc_resources),
 	.resource	= jz4740_adc_resources,
-};
-
-/* Watchdog */
-static struct resource jz4740_wdt_resources[] = {
-	{
-		.start = JZ4740_WDT_BASE_ADDR,
-		.end   = JZ4740_WDT_BASE_ADDR + 0x10 - 1,
-		.flags = IORESOURCE_MEM,
-	},
-};
-
-struct platform_device jz4740_wdt_device = {
-	.name	       = "jz4740-wdt",
-	.id	       = -1,
-	.num_resources = ARRAY_SIZE(jz4740_wdt_resources),
-	.resource      = jz4740_wdt_resources,
 };
 
 /* PWM */

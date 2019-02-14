@@ -1220,7 +1220,6 @@ static struct clk_rcg sdc1_src = {
 			.parent_names = gcc_pxo_pll8,
 			.num_parents = 2,
 			.ops = &clk_rcg_ops,
-			.flags = CLK_SET_RATE_GATE,
 		},
 	}
 };
@@ -1269,7 +1268,6 @@ static struct clk_rcg sdc3_src = {
 			.parent_names = gcc_pxo_pll8,
 			.num_parents = 2,
 			.ops = &clk_rcg_ops,
-			.flags = CLK_SET_RATE_GATE,
 		},
 	}
 };
@@ -1353,7 +1351,6 @@ static struct clk_rcg tsif_ref_src = {
 			.parent_names = gcc_pxo_pll8,
 			.num_parents = 2,
 			.ops = &clk_rcg_ops,
-			.flags = CLK_SET_RATE_GATE,
 		},
 	}
 };
@@ -2990,11 +2987,11 @@ static int gcc_ipq806x_probe(struct platform_device *pdev)
 	struct regmap *regmap;
 	int ret;
 
-	ret = qcom_cc_register_board_clk(dev, "cxo_board", "cxo", 19200000);
+	ret = qcom_cc_register_board_clk(dev, "cxo_board", "cxo", 25000000);
 	if (ret)
 		return ret;
 
-	ret = qcom_cc_register_board_clk(dev, "pxo_board", "pxo", 27000000);
+	ret = qcom_cc_register_board_clk(dev, "pxo_board", "pxo", 25000000);
 	if (ret)
 		return ret;
 

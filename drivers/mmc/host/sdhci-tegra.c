@@ -21,6 +21,7 @@
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/reset.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
@@ -65,6 +66,8 @@ struct sdhci_tegra {
 	struct gpio_desc *power_gpio;
 	bool ddr_signaling;
 	bool pad_calib_required;
+
+	struct reset_control *rst;
 };
 
 static u16 tegra_sdhci_readw(struct sdhci_host *host, int reg)
@@ -187,25 +190,6 @@ static void tegra_sdhci_reset(struct sdhci_host *host, u8 mask)
 	tegra_host->ddr_signaling = false;
 }
 
-static void tegra_sdhci_set_bus_width(struct sdhci_host *host, int bus_width)
-{
-	u32 ctrl;
-
-	ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
-	if ((host->mmc->caps & MMC_CAP_8_BIT_DATA) &&
-	    (bus_width == MMC_BUS_WIDTH_8)) {
-		ctrl &= ~SDHCI_CTRL_4BITBUS;
-		ctrl |= SDHCI_CTRL_8BITBUS;
-	} else {
-		ctrl &= ~SDHCI_CTRL_8BITBUS;
-		if (bus_width == MMC_BUS_WIDTH_4)
-			ctrl |= SDHCI_CTRL_4BITBUS;
-		else
-			ctrl &= ~SDHCI_CTRL_4BITBUS;
-	}
-	sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
-}
-
 static void tegra_sdhci_pad_autocalib(struct sdhci_host *host)
 {
 	u32 val;
@@ -226,9 +210,24 @@ static void tegra_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 	if (!clock)
 		return sdhci_set_clock(host, clock);
 
+	/*
+	 * In DDR50/52 modes the Tegra SDHCI controllers require the SDHCI
+	 * divider to be configured to divided the host clock by two. The SDHCI
+	 * clock divider is calculated as part of sdhci_set_clock() by
+	 * sdhci_calc_clk(). The divider is calculated from host->max_clk and
+	 * the requested clock rate.
+	 *
+	 * By setting the host->max_clk to clock * 2 the divider calculation
+	 * will always result in the correct value for DDR50/52 modes,
+	 * regardless of clock rate rounding, which may happen if the value
+	 * from clk_get_rate() is used.
+	 */
 	host_clk = tegra_host->ddr_signaling ? clock * 2 : clock;
 	clk_set_rate(pltfm_host->clk, host_clk);
-	host->max_clk = clk_get_rate(pltfm_host->clk);
+	if (tegra_host->ddr_signaling)
+		host->max_clk = host_clk;
+	else
+		host->max_clk = clk_get_rate(pltfm_host->clk);
 
 	sdhci_set_clock(host, clock);
 
@@ -244,21 +243,18 @@ static void tegra_sdhci_set_uhs_signaling(struct sdhci_host *host,
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(pltfm_host);
 
-	if (timing == MMC_TIMING_UHS_DDR50)
+	if (timing == MMC_TIMING_UHS_DDR50 ||
+	    timing == MMC_TIMING_MMC_DDR52)
 		tegra_host->ddr_signaling = true;
 
-	return sdhci_set_uhs_signaling(host, timing);
+	sdhci_set_uhs_signaling(host, timing);
 }
 
 static unsigned int tegra_sdhci_get_max_clock(struct sdhci_host *host)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 
-	/*
-	 * DDR modes require the host to run at double the card frequency, so
-	 * the maximum rate we can support is half of the module input clock.
-	 */
-	return clk_round_rate(pltfm_host->clk, UINT_MAX) / 2;
+	return clk_round_rate(pltfm_host->clk, UINT_MAX);
 }
 
 static void tegra_sdhci_set_tap(struct sdhci_host *host, unsigned int tap)
@@ -320,7 +316,7 @@ static const struct sdhci_ops tegra_sdhci_ops = {
 	.read_w     = tegra_sdhci_readw,
 	.write_l    = tegra_sdhci_writel,
 	.set_clock  = tegra_sdhci_set_clock,
-	.set_bus_width = tegra_sdhci_set_bus_width,
+	.set_bus_width = sdhci_set_bus_width,
 	.reset      = tegra_sdhci_reset,
 	.platform_execute_tuning = tegra_sdhci_execute_tuning,
 	.set_uhs_signaling = tegra_sdhci_set_uhs_signaling,
@@ -350,7 +346,16 @@ static const struct sdhci_pltfm_data sdhci_tegra30_pdata = {
 		  SDHCI_QUIRK_NO_HISPD_BIT |
 		  SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC |
 		  SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
-	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
+	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN |
+		   SDHCI_QUIRK2_BROKEN_HS200 |
+		   /*
+		    * Auto-CMD23 leads to "Got command interrupt 0x00010000 even
+		    * though no command operation was in progress."
+		    *
+		    * The exact reason is unknown, as the same hardware seems
+		    * to support Auto CMD23 on a downstream 3.1 kernel.
+		    */
+		   SDHCI_QUIRK2_ACMD23_BROKEN,
 	.ops  = &tegra_sdhci_ops,
 };
 
@@ -368,7 +373,7 @@ static const struct sdhci_ops tegra114_sdhci_ops = {
 	.write_w    = tegra_sdhci_writew,
 	.write_l    = tegra_sdhci_writel,
 	.set_clock  = tegra_sdhci_set_clock,
-	.set_bus_width = tegra_sdhci_set_bus_width,
+	.set_bus_width = sdhci_set_bus_width,
 	.reset      = tegra_sdhci_reset,
 	.platform_execute_tuning = tegra_sdhci_execute_tuning,
 	.set_uhs_signaling = tegra_sdhci_set_uhs_signaling,
@@ -431,7 +436,31 @@ static const struct sdhci_tegra_soc_data soc_data_tegra210 = {
 	.pdata = &sdhci_tegra210_pdata,
 };
 
+static const struct sdhci_pltfm_data sdhci_tegra186_pdata = {
+	.quirks = SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
+		  SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK |
+		  SDHCI_QUIRK_SINGLE_POWER_WRITE |
+		  SDHCI_QUIRK_NO_HISPD_BIT |
+		  SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC |
+		  SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
+	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN |
+		   /* SDHCI controllers on Tegra186 support 40-bit addressing.
+		    * IOVA addresses are 48-bit wide on Tegra186.
+		    * With 64-bit dma mask used for SDHCI, accesses can
+		    * be broken. Disable 64-bit dma, which would fall back
+		    * to 32-bit dma mask. Ideally 40-bit dma mask would work,
+		    * But it is not supported as of now.
+		    */
+		   SDHCI_QUIRK2_BROKEN_64_BIT_DMA,
+	.ops  = &tegra114_sdhci_ops,
+};
+
+static const struct sdhci_tegra_soc_data soc_data_tegra186 = {
+	.pdata = &sdhci_tegra186_pdata,
+};
+
 static const struct of_device_id sdhci_tegra_dt_match[] = {
+	{ .compatible = "nvidia,tegra186-sdhci", .data = &soc_data_tegra186 },
 	{ .compatible = "nvidia,tegra210-sdhci", .data = &soc_data_tegra210 },
 	{ .compatible = "nvidia,tegra124-sdhci", .data = &soc_data_tegra124 },
 	{ .compatible = "nvidia,tegra114-sdhci", .data = &soc_data_tegra114 },
@@ -489,6 +518,26 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	clk_prepare_enable(clk);
 	pltfm_host->clk = clk;
 
+	tegra_host->rst = devm_reset_control_get_exclusive(&pdev->dev,
+							   "sdhci");
+	if (IS_ERR(tegra_host->rst)) {
+		rc = PTR_ERR(tegra_host->rst);
+		dev_err(&pdev->dev, "failed to get reset control: %d\n", rc);
+		goto err_rst_get;
+	}
+
+	rc = reset_control_assert(tegra_host->rst);
+	if (rc)
+		goto err_rst_get;
+
+	usleep_range(2000, 4000);
+
+	rc = reset_control_deassert(tegra_host->rst);
+	if (rc)
+		goto err_rst_get;
+
+	usleep_range(2000, 4000);
+
 	rc = sdhci_add_host(host);
 	if (rc)
 		goto err_add_host;
@@ -496,12 +545,31 @@ static int sdhci_tegra_probe(struct platform_device *pdev)
 	return 0;
 
 err_add_host:
+	reset_control_assert(tegra_host->rst);
+err_rst_get:
 	clk_disable_unprepare(pltfm_host->clk);
 err_clk_get:
 err_power_req:
 err_parse_dt:
 	sdhci_pltfm_free(pdev);
 	return rc;
+}
+
+static int sdhci_tegra_remove(struct platform_device *pdev)
+{
+	struct sdhci_host *host = platform_get_drvdata(pdev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_tegra *tegra_host = sdhci_pltfm_priv(pltfm_host);
+
+	sdhci_remove_host(host, 0);
+
+	reset_control_assert(tegra_host->rst);
+	usleep_range(2000, 4000);
+	clk_disable_unprepare(pltfm_host->clk);
+
+	sdhci_pltfm_free(pdev);
+
+	return 0;
 }
 
 static struct platform_driver sdhci_tegra_driver = {
@@ -511,7 +579,7 @@ static struct platform_driver sdhci_tegra_driver = {
 		.pm	= &sdhci_pltfm_pmops,
 	},
 	.probe		= sdhci_tegra_probe,
-	.remove		= sdhci_pltfm_unregister,
+	.remove		= sdhci_tegra_remove,
 };
 
 module_platform_driver(sdhci_tegra_driver);

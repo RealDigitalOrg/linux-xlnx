@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Definitions for Xilinx Axi Ethernet device driver.
  *
  * Copyright (c) 2009 Secret Lab Technologies, Ltd.
- * Copyright (c) 2010 - 2012 Xilinx, Inc. All rights reserved.
+ * Copyright (c) 2010 - 2018 Xilinx, Inc. All rights reserved.
  */
 
 #ifndef XILINX_AXIENET_H
@@ -13,6 +14,8 @@
 #include <linux/interrupt.h>
 #include <linux/if_vlan.h>
 #include <linux/net_tstamp.h>
+#include <linux/phy.h>
+#include <linux/of_platform.h>
 
 /* Packet size info */
 #define XAE_HDR_SIZE			14 /* Size of Ethernet header */
@@ -23,6 +26,17 @@
 #define XAE_MAX_FRAME_SIZE	 (XAE_MTU + XAE_HDR_SIZE + XAE_TRL_SIZE)
 #define XAE_MAX_VLAN_FRAME_SIZE  (XAE_MTU + VLAN_ETH_HLEN + XAE_TRL_SIZE)
 #define XAE_MAX_JUMBO_FRAME_SIZE (XAE_JUMBO_MTU + XAE_HDR_SIZE + XAE_TRL_SIZE)
+
+/* Descriptors defines for Tx and Rx DMA - 2^n for the best performance */
+#define TX_BD_NUM		64
+#define RX_BD_NUM		128
+
+/* In AXI DMA Tx and Rx queue count is same */
+#define for_each_tx_dma_queue(lp, var) \
+	for ((var) = 0; (var) < (lp)->num_tx_queues; (var)++)
+
+#define for_each_rx_dma_queue(lp, var) \
+	for ((var) = 0; (var) < (lp)->num_rx_queues; (var)++)
 
 /* Configuration options */
 
@@ -371,13 +385,17 @@
 #endif
 
 /* XXV MAC Register Definitions */
+#define XXV_GT_RESET_OFFSET		0x00000000
 #define XXV_TC_OFFSET			0x0000000C
 #define XXV_RCW1_OFFSET			0x00000014
 #define XXV_JUM_OFFSET			0x00000018
 #define XXV_TICKREG_OFFSET		0x00000020
 #define XXV_STATRX_BLKLCK_OFFSET	0x0000040C
+#define XXV_USXGMII_AN_OFFSET		0x000000C8
+#define XXV_USXGMII_AN_STS_OFFSET	0x00000458
 
 /* XXV MAC Register Mask Definitions */
+#define XXV_GT_RESET_MASK	BIT(0)
 #define XXV_TC_TX_MASK		BIT(0)
 #define XXV_RCW1_RX_MASK	BIT(0)
 #define XXV_RCW1_FCS_MASK	BIT(1)
@@ -387,6 +405,24 @@
 #define XXV_RX_BLKLCK_MASK	BIT(0)
 #define XXV_TICKREG_STATEN_MASK BIT(0)
 #define XXV_MAC_MIN_PKT_LEN	64
+
+/* USXGMII Register Mask Definitions  */
+#define USXGMII_AN_EN		BIT(5)
+#define USXGMII_AN_RESET	BIT(6)
+#define USXGMII_AN_RESTART	BIT(7)
+#define USXGMII_EN		BIT(16)
+#define USXGMII_RATE_MASK	0x0E000700
+#define USXGMII_RATE_1G		0x04000200
+#define USXGMII_RATE_2G5	0x08000400
+#define USXGMII_RATE_10M	0x0
+#define USXGMII_RATE_100M	0x02000100
+#define USXGMII_RATE_5G		0x0A000500
+#define USXGMII_RATE_10G	0x06000300
+#define USXGMII_FD		BIT(28)
+#define USXGMII_LINK_STS	BIT(31)
+
+/* USXGMII AN STS register mask definitions */
+#define USXGMII_AN_STS_COMP_MASK	BIT(16)
 
 /* MCDMA Register Definitions */
 #define XMCDMA_CR_OFFSET	0x00
@@ -560,22 +596,33 @@ struct aximcdma_bd {
 #define DESC_DMA_MAP_SINGLE 0
 #define DESC_DMA_MAP_PAGE 1
 
-#ifdef CONFIG_XILINX_TSN
-enum XAE_QUEUE {
-	XAE_BE = 0, /* best effort */
-	XAE_RE,	   /* reserved(cbs) */
-	XAE_ST,    /* Scheduled */
-	XAE_MAX_QUEUES,
-};
+#if defined(CONFIG_XILINX_TSN)
+#define XAE_MAX_QUEUES		5
 #elif defined(CONFIG_AXIENET_HAS_MCDMA)
-#define XAE_MAX_QUEUES   16
+#define XAE_MAX_QUEUES		16
 #else
-#define XAE_MAX_QUEUES   1
+#define XAE_MAX_QUEUES		1
 #endif
 
-#ifdef CONFIG_XILINX_TSN_PTP
-#define SIOCCHIOCTL SIOCDEVPRIVATE
+#ifdef CONFIG_XILINX_TSN
+/* TSN queues range is 2 to 5. For eg: for num_tc = 2 minimum queues = 2;
+ * for num_tc = 3 with sideband signalling maximum queues = 5
+ */
+#define XAE_MAX_TSN_TC		3
+#define XAE_TSN_MIN_QUEUES	2
 #endif
+
+enum axienet_tsn_ioctl {
+	SIOCCHIOCTL = SIOCDEVPRIVATE,
+	SIOC_GET_SCHED,
+	SIOC_PREEMPTION_CFG,
+	SIOC_PREEMPTION_CTRL,
+	SIOC_PREEMPTION_STS,
+	SIOC_PREEMPTION_COUNTER,
+	SIOC_QBU_USER_OVERRIDE,
+	SIOC_QBU_STS,
+};
+
 /**
  * struct axienet_local - axienet private per device data
  * @ndev:	Pointer for net_device to which it will be attached.
@@ -585,16 +632,19 @@ enum XAE_QUEUE {
  * @regs:	Base address for the axienet_local device address space
  * @mcdma_regs:	Base address for the aximcdma device address space
  * @napi:	Napi Structure array for all dma queues
- * @num_queues: Total number of DMA queues
+ * @num_tx_queues: Total number of Tx DMA queues
+ * @num_rx_queues: Total number of Rx DMA queues
  * @dq:		DMA queues data
+ * @phy_mode:	Phy type to identify between MII/GMII/RGMII/SGMII/1000 Base-X
  * @is_tsn:	Denotes a tsn port
- * @num_q:	Denotes number of queue in current TSN design
  * @temac_no:	Denotes the port number in TSN IP
+ * @num_tc:	Total number of TSN Traffic classes
  * @timer_priv: PTP timer private data pointer
  * @ptp_tx_irq: PTP tx irq
  * @ptp_rx_irq: PTP rx irq
  * @rtc_irq:	PTP RTC irq
  * @qbv_irq:	QBV shed irq
+ * @ptp_ts_type: ptp time stamp type - 1 or 2 step mode
  * @ptp_rx_hw_pointer: ptp rx hw pointer
  * @ptp_rx_sw_pointer: ptp rx sw pointer
  * @ptp_txq:	PTP tx queue header
@@ -602,7 +652,6 @@ enum XAE_QUEUE {
  * @ptp_tx_lock: PTP tx lock
  * @dma_err_tasklet: Tasklet structure to process Axi DMA errors
  * @eth_irq:	Axi Ethernet IRQ number
- * @phy_type:	Phy type to identify between MII/GMII/RGMII/SGMII/1000 Base-X
  * @options:	AxiEthernet option word
  * @last_link:	Phy link state in which the PHY was negotiated earlier
  * @features:	Stores the extended features supported by the axienet hw
@@ -630,6 +679,7 @@ enum XAE_QUEUE {
  * @chan_num: MCDMA Channel number to be operate on.
  * @chan_id:  MCMDA Channel id used in conjunction with weight parameter.
  * @weight:   MCDMA Channel weight value to be configured for.
+ * @usxgmii_rate: USXGMII PHY speed.
  */
 struct axienet_local {
 	struct net_device *ndev;
@@ -651,17 +701,22 @@ struct axienet_local {
 	#define XAE_TEMAC1 0
 	#define XAE_TEMAC2 1
 	u8     temac_no;
-	u16    num_queues;	/* Number of DMA queues */
+	u16    num_tx_queues;	/* Number of TX DMA queues */
+	u16    num_rx_queues;	/* Number of RX DMA queues */
 	struct axienet_dma_q *dq[XAE_MAX_QUEUES];	/* DAM queue data*/
+
+	phy_interface_t phy_mode;
+
 	bool is_tsn;
 #ifdef CONFIG_XILINX_TSN
-	int num_q;
+	u16    num_tc;		/* Number of TSN Traffic classes */
 #ifdef CONFIG_XILINX_TSN_PTP
 	void *timer_priv;
 	int ptp_tx_irq;
 	int ptp_rx_irq;
 	int rtc_irq;
 	int qbv_irq;
+	int ptp_ts_type;
 	u8  ptp_rx_hw_pointer;
 	u8  ptp_rx_sw_pointer;
 	struct sk_buff_head ptp_txq;
@@ -670,7 +725,6 @@ struct axienet_local {
 #endif
 #endif
 	int eth_irq;
-	u32 phy_type;
 
 	u32 options;			/* Current options word */
 	u32 last_link;
@@ -690,7 +744,7 @@ struct axienet_local {
 	bool eth_hasptp;
 	const struct axienet_config *axienet_config;
 
-#ifdef CONFIG_XILINX_AXI_EMAC_HWTSTAMP
+#if defined (CONFIG_XILINX_AXI_EMAC_HWTSTAMP) || defined (CONFIG_XILINX_TSN_PTP)
 	void __iomem *tx_ts_regs;
 	void __iomem *rx_ts_regs;
 	struct hwtstamp_config tstamp_config;
@@ -705,6 +759,8 @@ struct axienet_local {
 	/* WRR Fields */
 	u16 chan_id;
 	u16 weight;
+
+	u32 usxgmii_rate;
 };
 
 /**
@@ -778,7 +834,8 @@ struct axienet_dma_q {
 	unsigned long rx_bytes;
 };
 
-#define AXIENET_SSTATS_LEN(lp) ((lp)->num_queues * 4)
+#define AXIENET_TX_SSTATS_LEN(lp) ((lp)->num_tx_queues * 2)
+#define AXIENET_RX_SSTATS_LEN(lp) ((lp)->num_rx_queues * 2)
 
 /**
  * enum axienet_ip_type - AXIENET IP/MAC type.
@@ -905,6 +962,54 @@ static inline void axienet_rxts_iow(struct  axienet_local *lp, off_t reg,
 }
 #endif
 
+/**
+ * axienet_dma_in32 - Memory mapped Axi DMA register read
+ * @q:		Pointer to DMA queue structure
+ * @reg:	Address offset from the base address of the Axi DMA core
+ *
+ * Return: The contents of the Axi DMA register
+ *
+ * This function returns the contents of the corresponding Axi DMA register.
+ */
+static inline u32 axienet_dma_in32(struct axienet_dma_q *q, off_t reg)
+{
+	return in_be32(q->dma_regs + reg);
+}
+
+/**
+ * axienet_dma_out32 - Memory mapped Axi DMA register write.
+ * @q:		Pointer to DMA queue structure
+ * @reg:	Address offset from the base address of the Axi DMA core
+ * @value:	Value to be written into the Axi DMA register
+ *
+ * This function writes the desired value into the corresponding Axi DMA
+ * register.
+ */
+static inline void axienet_dma_out32(struct axienet_dma_q *q,
+				     off_t reg, u32 value)
+{
+	out_be32((q->dma_regs + reg), value);
+}
+
+/**
+ * axienet_dma_bdout - Memory mapped Axi DMA register Buffer Descriptor write.
+ * @q:		Pointer to DMA queue structure
+ * @reg:	Address offset from the base address of the Axi DMA core
+ * @value:	Value to be written into the Axi DMA register
+ *
+ * This function writes the desired value into the corresponding Axi DMA
+ * register.
+ */
+static inline void axienet_dma_bdout(struct axienet_dma_q *q,
+				     off_t reg, dma_addr_t value)
+{
+#if defined(CONFIG_PHYS_ADDR_T_64BIT)
+	writeq(value, (q->dma_regs + reg));
+#else
+	writel(value, (q->dma_regs + reg));
+#endif
+}
+
 /* Function prototypes visible in xilinx_axienet_mdio.c for other files */
 int axienet_mdio_setup(struct axienet_local *lp, struct device_node *np);
 int axienet_mdio_wait_until_ready(struct axienet_local *lp);
@@ -916,6 +1021,67 @@ void axienet_tx_tstamp(struct work_struct *work);
 int axienet_qbv_init(struct net_device *ndev);
 void axienet_qbv_remove(struct net_device *ndev);
 int axienet_set_schedule(struct net_device *ndev, void __user *useraddr);
+int axienet_get_schedule(struct net_device *ndev, void __user *useraddr);
+#endif
+
+#ifdef CONFIG_XILINX_TSN_QBR
+int axienet_preemption(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_ctrl(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_sts(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_cnt(struct net_device *ndev, void __user *useraddr);
+#ifdef CONFIG_XILINX_TSN_QBV
+int axienet_qbu_user_override(struct net_device *ndev, void __user *useraddr);
+int axienet_qbu_sts(struct net_device *ndev, void __user *useraddr);
+#endif
+#endif
+
+void __maybe_unused axienet_bd_free(struct net_device *ndev,
+				    struct axienet_dma_q *q);
+int __maybe_unused axienet_dma_q_init(struct net_device *ndev,
+				      struct axienet_dma_q *q);
+void axienet_dma_err_handler(unsigned long data);
+irqreturn_t __maybe_unused axienet_tx_irq(int irq, void *_ndev);
+irqreturn_t __maybe_unused axienet_rx_irq(int irq, void *_ndev);
+void axienet_start_xmit_done(struct net_device *ndev, struct axienet_dma_q *q);
+void axienet_dma_bd_release(struct net_device *ndev);
+void __axienet_device_reset(struct axienet_dma_q *q, off_t offset);
+void axienet_set_mac_address(struct net_device *ndev, const void *address);
+void axienet_set_multicast_list(struct net_device *ndev);
+int xaxienet_rx_poll(struct napi_struct *napi, int quota);
+
+#if defined(CONFIG_AXIENET_HAS_MCDMA)
+int __maybe_unused axienet_mcdma_rx_q_init(struct net_device *ndev,
+					   struct axienet_dma_q *q);
+int __maybe_unused axienet_mcdma_tx_q_init(struct net_device *ndev,
+					   struct axienet_dma_q *q);
+void __maybe_unused axienet_mcdma_tx_bd_free(struct net_device *ndev,
+					     struct axienet_dma_q *q);
+void __maybe_unused axienet_mcdma_rx_bd_free(struct net_device *ndev,
+					     struct axienet_dma_q *q);
+irqreturn_t __maybe_unused axienet_mcdma_tx_irq(int irq, void *_ndev);
+irqreturn_t __maybe_unused axienet_mcdma_rx_irq(int irq, void *_ndev);
+void __maybe_unused axienet_mcdma_err_handler(unsigned long data);
+void axienet_strings(struct net_device *ndev, u32 sset, u8 *data);
+int axienet_sset_count(struct net_device *ndev, int sset);
+void axienet_get_stats(struct net_device *ndev,
+		       struct ethtool_stats *stats,
+		       u64 *data);
+int axeinet_mcdma_create_sysfs(struct kobject *kobj);
+void axeinet_mcdma_remove_sysfs(struct kobject *kobj);
+int __maybe_unused axienet_mcdma_tx_probe(struct platform_device *pdev,
+					  struct device_node *np,
+					  struct axienet_local *lp);
+int __maybe_unused axienet_mcdma_rx_probe(struct platform_device *pdev,
+					  struct axienet_local *lp,
+					  struct net_device *ndev);
+#endif
+
+#ifdef CONFIG_AXIENET_HAS_MCDMA
+void axienet_tx_hwtstamp(struct axienet_local *lp,
+			 struct aximcdma_bd *cur_p);
+#else
+void axienet_tx_hwtstamp(struct axienet_local *lp,
+			 struct axidma_bd *cur_p);
 #endif
 
 #endif /* XILINX_AXI_ENET_H */

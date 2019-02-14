@@ -20,8 +20,6 @@ Required Properties:
   - clocks: From clock bindings: Handles to clock inputs.
   - clock-names: From clock bindings: Tuple including "clk_xin" and "clk_ahb"
   - interrupts: Interrupt specifier
-  - interrupt-parent: Phandle for the interrupt controller that services
-		      interrupts for this device.
 
 Required Properties for "arasan,sdhci-5.1":
   - phys: From PHY bindings: Phandle for the Generic PHY for arasan.
@@ -52,6 +50,24 @@ Optional Properties:
 Optional Properties for "xlnx,zynqmp-8.9a":
  - nvmem-cells: list of phandle to the nvmem data cells.
  - nvmem-cell-names: Names for the each nvmem-cells specified.
+ - xlnx,int-clock-stable-broken: when present, the controller always reports
+   that the internal clock is stable even when it is not.
+ - xlnx,itap-delay-sd-hsd: Input Tap Delay for SD HS.
+ - xlnx,itap-delay-sdr25: Input Tap Delay for SDR25.
+ - xlnx,itap-delay-sdr50: Input Tap Delay for SDR50.
+ - xlnx,itap-delay-sdr104: Input Tap Delay for SDR104.
+ - xlnx,itap-delay-sd-ddr50: Input Tap Delay for SD DDR50.
+ - xlnx,itap-delay-mmc-hsd: Input Tap Delay for MMC HS.
+ - xlnx,itap-delay-mmc-ddr52: Input Tap Delay for MMC DDR52.
+ - xlnx,itap-delay-mmc-hs200: Input Tap Delay for MMC HS200.
+ - xlnx,otap-delay-sd-hsd: Output Tap Delay for SD HS.
+ - xlnx,otap-delay-sdr25: Output Tap Delay for SDR25.
+ - xlnx,otap-delay-sdr50: Output Tap Delay for SDR50.
+ - xlnx,otap-delay-sdr104: Output Tap Delay for SDR104.
+ - xlnx,otap-delay-sd-ddr50: Output Tap Delay for DDR50.
+ - xlnx,otap-delay-mmc-hsd: Output Tap Delay for MMC HS.
+ - xlnx,otap-delay-mmc-ddr52: Output Tap Delay for MMC DDR52.
+ - xlnx,otap-delay-mmc-hs200: Output Tap Delay for MMC HS200.
 
 Example:
 	sdhci@e0100000 {
@@ -87,5 +103,4 @@ Example:
 		phys = <&emmc_phy>;
 		phy-names = "phy_arasan";
 		#clock-cells = <0>;
-		status = "disabled";
 	};

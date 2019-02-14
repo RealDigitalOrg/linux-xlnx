@@ -58,17 +58,21 @@ static int xen_map_device_mmio(const struct resource *resources,
 	xen_pfn_t *gpfns;
 	xen_ulong_t *idxs;
 	int *errs;
-	struct xen_add_to_physmap_range xatp;
 
 	for (i = 0; i < count; i++) {
+		struct xen_add_to_physmap_range xatp = {
+			.domid = DOMID_SELF,
+			.space = XENMAPSPACE_dev_mmio
+		};
+
 		r = &resources[i];
 		nr = DIV_ROUND_UP(resource_size(r), XEN_PAGE_SIZE);
 		if ((resource_type(r) != IORESOURCE_MEM) || (nr == 0))
 			continue;
 
-		gpfns = kzalloc(sizeof(xen_pfn_t) * nr, GFP_KERNEL);
-		idxs = kzalloc(sizeof(xen_ulong_t) * nr, GFP_KERNEL);
-		errs = kzalloc(sizeof(int) * nr, GFP_KERNEL);
+		gpfns = kcalloc(nr, sizeof(xen_pfn_t), GFP_KERNEL);
+		idxs = kcalloc(nr, sizeof(xen_ulong_t), GFP_KERNEL);
+		errs = kcalloc(nr, sizeof(int), GFP_KERNEL);
 		if (!gpfns || !idxs || !errs) {
 			kfree(gpfns);
 			kfree(idxs);
@@ -87,9 +91,7 @@ static int xen_map_device_mmio(const struct resource *resources,
 			idxs[j] = XEN_PFN_DOWN(r->start) + j;
 		}
 
-		xatp.domid = DOMID_SELF;
 		xatp.size = nr;
-		xatp.space = XENMAPSPACE_dev_mmio;
 
 		set_xen_guest_handle(xatp.gpfns, gpfns);
 		set_xen_guest_handle(xatp.idxs, idxs);

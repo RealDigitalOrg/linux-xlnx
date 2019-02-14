@@ -243,12 +243,15 @@ qla2x00_sysfs_read_optrom(struct file *filp, struct kobject *kobj,
 	struct qla_hw_data *ha = vha->hw;
 	ssize_t rval = 0;
 
-	if (ha->optrom_state != QLA_SREADING)
-		return 0;
-
 	mutex_lock(&ha->optrom_mutex);
+
+	if (ha->optrom_state != QLA_SREADING)
+		goto out;
+
 	rval = memory_read_from_buffer(buf, count, &off, ha->optrom_buffer,
 	    ha->optrom_region_size);
+
+out:
 	mutex_unlock(&ha->optrom_mutex);
 
 	return rval;
@@ -263,14 +266,19 @@ qla2x00_sysfs_write_optrom(struct file *filp, struct kobject *kobj,
 	    struct device, kobj)));
 	struct qla_hw_data *ha = vha->hw;
 
-	if (ha->optrom_state != QLA_SWRITING)
+	mutex_lock(&ha->optrom_mutex);
+
+	if (ha->optrom_state != QLA_SWRITING) {
+		mutex_unlock(&ha->optrom_mutex);
 		return -EINVAL;
-	if (off > ha->optrom_region_size)
+	}
+	if (off > ha->optrom_region_size) {
+		mutex_unlock(&ha->optrom_mutex);
 		return -ERANGE;
+	}
 	if (off + count > ha->optrom_region_size)
 		count = ha->optrom_region_size - off;
 
-	mutex_lock(&ha->optrom_mutex);
 	memcpy(&ha->optrom_buffer[off], buf, count);
 	mutex_unlock(&ha->optrom_mutex);
 
@@ -310,6 +318,8 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		return -EINVAL;
 	if (start > ha->optrom_size)
 		return -EINVAL;
+	if (size > ha->optrom_size - start)
+		size = ha->optrom_size - start;
 
 	mutex_lock(&ha->optrom_mutex);
 	switch (val) {
@@ -335,8 +345,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = start + size > ha->optrom_size ?
-		    ha->optrom_size - start : size;
+		ha->optrom_region_size = start + size;
 
 		ha->optrom_state = QLA_SREADING;
 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
@@ -409,8 +418,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
 		}
 
 		ha->optrom_region_start = start;
-		ha->optrom_region_size = start + size > ha->optrom_size ?
-		    ha->optrom_size - start : size;
+		ha->optrom_region_size = start + size;
 
 		ha->optrom_state = QLA_SWRITING;
 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
@@ -510,6 +518,9 @@ qla2x00_sysfs_write_vpd(struct file *filp, struct kobject *kobj,
 	if (unlikely(pci_channel_offline(ha->pdev)))
 		return 0;
 
+	if (qla2x00_chip_is_down(vha))
+		return 0;
+
 	if (!capable(CAP_SYS_ADMIN) || off != 0 || count != ha->vpd_size ||
 	    !ha->isp_ops->write_nvram)
 		return 0;
@@ -557,47 +568,17 @@ qla2x00_sysfs_read_sfp(struct file *filp, struct kobject *kobj,
 {
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
 	    struct device, kobj)));
-	struct qla_hw_data *ha = vha->hw;
-	uint16_t iter, addr, offset;
 	int rval;
 
-	if (!capable(CAP_SYS_ADMIN) || off != 0 || count != SFP_DEV_SIZE * 2)
+	if (!capable(CAP_SYS_ADMIN) || off != 0 || count < SFP_DEV_SIZE)
 		return 0;
 
-	if (ha->sfp_data)
-		goto do_read;
-
-	ha->sfp_data = dma_pool_alloc(ha->s_dma_pool, GFP_KERNEL,
-	    &ha->sfp_data_dma);
-	if (!ha->sfp_data) {
-		ql_log(ql_log_warn, vha, 0x706c,
-		    "Unable to allocate memory for SFP read-data.\n");
+	if (qla2x00_chip_is_down(vha))
 		return 0;
-	}
 
-do_read:
-	memset(ha->sfp_data, 0, SFP_BLOCK_SIZE);
-	addr = 0xa0;
-	for (iter = 0, offset = 0; iter < (SFP_DEV_SIZE * 2) / SFP_BLOCK_SIZE;
-	    iter++, offset += SFP_BLOCK_SIZE) {
-		if (iter == 4) {
-			/* Skip to next device address. */
-			addr = 0xa2;
-			offset = 0;
-		}
-
-		rval = qla2x00_read_sfp(vha, ha->sfp_data_dma, ha->sfp_data,
-		    addr, offset, SFP_BLOCK_SIZE, BIT_1);
-		if (rval != QLA_SUCCESS) {
-			ql_log(ql_log_warn, vha, 0x706d,
-			    "Unable to read SFP data (%x/%x/%x).\n", rval,
-			    addr, offset);
-
-			return -EIO;
-		}
-		memcpy(buf, ha->sfp_data, SFP_BLOCK_SIZE);
-		buf += SFP_BLOCK_SIZE;
-	}
+	rval = qla2x00_read_sfp_dev(vha, buf, count);
+	if (rval)
+		return -EIO;
 
 	return count;
 }
@@ -607,7 +588,7 @@ static struct bin_attribute sysfs_sfp_attr = {
 		.name = "sfp",
 		.mode = S_IRUSR | S_IWUSR,
 	},
-	.size = SFP_DEV_SIZE * 2,
+	.size = SFP_DEV_SIZE,
 	.read = qla2x00_sysfs_read_sfp,
 };
 
@@ -687,7 +668,7 @@ qla2x00_sysfs_write_reset(struct file *filp, struct kobject *kobj,
 	case 0x2025e:
 		if (!IS_P3P_TYPE(ha) || vha != base_vha) {
 			ql_log(ql_log_info, vha, 0x7071,
-			    "FCoE ctx reset no supported.\n");
+			    "FCoE ctx reset not supported.\n");
 			return -EPERM;
 		}
 
@@ -753,8 +734,16 @@ qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
 	struct scsi_qla_host *vha = shost_priv(dev_to_shost(container_of(kobj,
 	    struct device, kobj)));
 	int type;
-	int rval = 0;
 	port_id_t did;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return 0;
+
+	if (unlikely(pci_channel_offline(vha->hw->pdev)))
+		return 0;
+
+	if (qla2x00_chip_is_down(vha))
+		return 0;
 
 	type = simple_strtol(buf, NULL, 10);
 
@@ -762,12 +751,12 @@ qla2x00_issue_logo(struct file *filp, struct kobject *kobj,
 	did.b.area = (type & 0x0000ff00) >> 8;
 	did.b.al_pa = (type & 0x000000ff);
 
-	ql_log(ql_log_info, vha, 0x70e3, "portid=%02x%02x%02x done\n",
+	ql_log(ql_log_info, vha, 0xd04d, "portid=%02x%02x%02x done\n",
 	    did.b.domain, did.b.area, did.b.al_pa);
 
 	ql_log(ql_log_info, vha, 0x70e4, "%s: %d\n", __func__, type);
 
-	rval = qla24xx_els_dcmd_iocb(vha, ELS_DCMD_LOGO, did);
+	qla24xx_els_dcmd_iocb(vha, ELS_DCMD_LOGO, did);
 	return count;
 }
 
@@ -792,6 +781,12 @@ qla2x00_sysfs_read_xgmac_stats(struct file *filp, struct kobject *kobj,
 	uint16_t actual_size;
 
 	if (!capable(CAP_SYS_ADMIN) || off != 0 || count > XGMAC_DATA_SIZE)
+		return 0;
+
+	if (unlikely(pci_channel_offline(ha->pdev)))
+		return 0;
+
+	if (qla2x00_chip_is_down(vha))
 		return 0;
 
 	if (ha->xgmac_data)
@@ -847,6 +842,9 @@ qla2x00_sysfs_read_dcbx_tlv(struct file *filp, struct kobject *kobj,
 
 	if (ha->dcbx_tlv)
 		goto do_read;
+
+	if (qla2x00_chip_is_down(vha))
+		return 0;
 
 	ha->dcbx_tlv = dma_alloc_coherent(&ha->pdev->dev, DCBX_TLV_DATA_SIZE,
 	    &ha->dcbx_tlv_dma, GFP_KERNEL);
@@ -922,7 +920,7 @@ qla2x00_alloc_sysfs_attr(scsi_qla_host_t *vha)
 			    iter->name, ret);
 		else
 			ql_dbg(ql_dbg_init, vha, 0x00f4,
-			    "Successfully created sysfs %s binary attribure.\n",
+			    "Successfully created sysfs %s binary attribute.\n",
 			    iter->name);
 	}
 }
@@ -1059,7 +1057,7 @@ qla2x00_link_state_show(struct device *dev, struct device_attribute *attr,
 	    vha->device_flags & DFLG_NO_CABLE)
 		len = scnprintf(buf, PAGE_SIZE, "Link Down\n");
 	else if (atomic_read(&vha->loop_state) != LOOP_READY ||
-	    qla2x00_reset_active(vha))
+	    qla2x00_chip_is_down(vha))
 		len = scnprintf(buf, PAGE_SIZE, "Unknown Link State\n");
 	else {
 		len = scnprintf(buf, PAGE_SIZE, "Link Up - ");
@@ -1186,7 +1184,7 @@ qla2x00_beacon_store(struct device *dev, struct device_attribute *attr,
 	if (IS_QLA2100(ha) || IS_QLA2200(ha))
 		return -EPERM;
 
-	if (test_bit(ABORT_ISP_ACTIVE, &vha->dpc_flags)) {
+	if (qla2x00_chip_is_down(vha)) {
 		ql_log(ql_log_warn, vha, 0x707a,
 		    "Abort ISP active -- ignoring beacon request.\n");
 		return -EBUSY;
@@ -1373,7 +1371,7 @@ qla2x00_thermal_temp_show(struct device *dev,
 	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
 	uint16_t temp = 0;
 
-	if (qla2x00_reset_active(vha)) {
+	if (qla2x00_chip_is_down(vha)) {
 		ql_log(ql_log_warn, vha, 0x70dc, "ISP reset active.\n");
 		goto done;
 	}
@@ -1404,7 +1402,7 @@ qla2x00_fw_state_show(struct device *dev, struct device_attribute *attr,
 		return scnprintf(buf, PAGE_SIZE, "0x%x\n", pstate);
 	}
 
-	if (qla2x00_reset_active(vha))
+	if (qla2x00_chip_is_down(vha))
 		ql_log(ql_log_warn, vha, 0x707c,
 		    "ISP reset active.\n");
 	else if (!vha->hw->flags.eeh_busy)
@@ -1504,6 +1502,38 @@ qla2x00_pep_version_show(struct device *dev, struct device_attribute *attr,
 	    ha->pep_version[0], ha->pep_version[1], ha->pep_version[2]);
 }
 
+static ssize_t
+qla2x00_min_link_speed_show(struct device *dev, struct device_attribute *attr,
+    char *buf)
+{
+	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
+	struct qla_hw_data *ha = vha->hw;
+
+	if (!IS_QLA27XX(ha))
+		return scnprintf(buf, PAGE_SIZE, "\n");
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+	    ha->min_link_speed == 5 ? "32Gps" :
+	    ha->min_link_speed == 4 ? "16Gps" :
+	    ha->min_link_speed == 3 ? "8Gps" :
+	    ha->min_link_speed == 2 ? "4Gps" :
+	    ha->min_link_speed != 0 ? "unknown" : "");
+}
+
+static ssize_t
+qla2x00_max_speed_sup_show(struct device *dev, struct device_attribute *attr,
+    char *buf)
+{
+	scsi_qla_host_t *vha = shost_priv(class_to_shost(dev));
+	struct qla_hw_data *ha = vha->hw;
+
+	if (!IS_QLA27XX(ha))
+		return scnprintf(buf, PAGE_SIZE, "\n");
+
+	return scnprintf(buf, PAGE_SIZE, "%s\n",
+	    ha->max_speed_sup ? "32Gps" : "16Gps");
+}
+
 static DEVICE_ATTR(driver_version, S_IRUGO, qla2x00_drvr_version_show, NULL);
 static DEVICE_ATTR(fw_version, S_IRUGO, qla2x00_fw_version_show, NULL);
 static DEVICE_ATTR(serial_num, S_IRUGO, qla2x00_serial_num_show, NULL);
@@ -1549,6 +1579,8 @@ static DEVICE_ATTR(allow_cna_fw_dump, S_IRUGO | S_IWUSR,
 		   qla2x00_allow_cna_fw_dump_show,
 		   qla2x00_allow_cna_fw_dump_store);
 static DEVICE_ATTR(pep_version, S_IRUGO, qla2x00_pep_version_show, NULL);
+static DEVICE_ATTR(min_link_speed, S_IRUGO, qla2x00_min_link_speed_show, NULL);
+static DEVICE_ATTR(max_speed_sup, S_IRUGO, qla2x00_max_speed_sup_show, NULL);
 
 struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_driver_version,
@@ -1583,6 +1615,8 @@ struct device_attribute *qla2x00_host_attrs[] = {
 	&dev_attr_fw_dump_size,
 	&dev_attr_allow_cna_fw_dump,
 	&dev_attr_pep_version,
+	&dev_attr_min_link_speed,
+	&dev_attr_max_speed_sup,
 	NULL,
 };
 
@@ -1827,17 +1861,16 @@ qla2x00_get_fc_host_stats(struct Scsi_Host *shost)
 	if (unlikely(pci_channel_offline(ha->pdev)))
 		goto done;
 
-	if (qla2x00_reset_active(vha))
+	if (qla2x00_chip_is_down(vha))
 		goto done;
 
-	stats = dma_alloc_coherent(&ha->pdev->dev,
-	    sizeof(*stats), &stats_dma, GFP_KERNEL);
+	stats = dma_zalloc_coherent(&ha->pdev->dev, sizeof(*stats),
+				    &stats_dma, GFP_KERNEL);
 	if (!stats) {
 		ql_log(ql_log_warn, vha, 0x707d,
 		    "Failed to allocate memory for stats.\n");
 		goto done;
 	}
-	memset(stats, 0, sizeof(*stats));
 
 	rval = QLA_FUNCTION_FAILED;
 	if (IS_FWI2_CAPABLE(ha)) {
@@ -1988,9 +2021,9 @@ qla24xx_vport_create(struct fc_vport *fc_vport, bool disable)
 	scsi_qla_host_t *base_vha = shost_priv(fc_vport->shost);
 	scsi_qla_host_t *vha = NULL;
 	struct qla_hw_data *ha = base_vha->hw;
-	uint16_t options = 0;
 	int	cnt;
 	struct req_que *req = ha->req_q_map[0];
+	struct qla_qpair *qpair;
 
 	ret = qla24xx_vport_create_req_sanity_check(fc_vport);
 	if (ret) {
@@ -2075,15 +2108,9 @@ qla24xx_vport_create(struct fc_vport *fc_vport, bool disable)
 	qlt_vport_create(vha, ha);
 	qla24xx_vport_disable(fc_vport, disable);
 
-	if (ha->flags.cpu_affinity_enabled) {
-		req = ha->req_q_map[1];
-		ql_dbg(ql_dbg_multiq, vha, 0xc000,
-		    "Request queue %p attached with "
-		    "VP[%d], cpu affinity =%d\n",
-		    req, vha->vp_idx, ha->flags.cpu_affinity_enabled);
+	if (!ql2xmqsupport || !ha->npiv_info)
 		goto vport_queue;
-	} else if (ql2xmaxqueues == 1 || !ha->npiv_info)
-		goto vport_queue;
+
 	/* Create a request queue in QoS mode for the vport */
 	for (cnt = 0; cnt < ha->nvram_npiv_size; cnt++) {
 		if (memcmp(ha->npiv_info[cnt].port_name, vha->port_name, 8) == 0
@@ -2095,20 +2122,20 @@ qla24xx_vport_create(struct fc_vport *fc_vport, bool disable)
 	}
 
 	if (qos) {
-		ret = qla25xx_create_req_que(ha, options, vha->vp_idx, 0, 0,
-			qos);
-		if (!ret)
+		qpair = qla2xxx_create_qpair(vha, qos, vha->vp_idx, true);
+		if (!qpair)
 			ql_log(ql_log_warn, vha, 0x7084,
-			    "Can't create request queue for VP[%d]\n",
+			    "Can't create qpair for VP[%d]\n",
 			    vha->vp_idx);
 		else {
 			ql_dbg(ql_dbg_multiq, vha, 0xc001,
-			    "Request Que:%d Q0s: %d) created for VP[%d]\n",
-			    ret, qos, vha->vp_idx);
+			    "Queue pair: %d Qos: %d) created for VP[%d]\n",
+			    qpair->id, qos, vha->vp_idx);
 			ql_dbg(ql_dbg_user, vha, 0x7085,
-			    "Request Que:%d Q0s: %d) created for VP[%d]\n",
-			    ret, qos, vha->vp_idx);
-			req = ha->req_q_map[ret];
+			    "Queue Pair: %d Qos: %d) created for VP[%d]\n",
+			    qpair->id, qos, vha->vp_idx);
+			req = qpair->req;
+			vha->qpair = qpair;
 		}
 	}
 
@@ -2135,6 +2162,7 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
 		msleep(1000);
 
 	qla24xx_disable_vp(vha);
+	qla2x00_wait_for_sess_deletion(vha);
 
 	vha->flags.delete_progress = 1;
 
@@ -2153,8 +2181,6 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
 		    "Timer for the VP[%d] has stopped\n", vha->vp_idx);
 	}
 
-	BUG_ON(atomic_read(&vha->vref_count));
-
 	qla2x00_free_fcports(vha);
 
 	mutex_lock(&ha->vport_lock);
@@ -2162,10 +2188,15 @@ qla24xx_vport_delete(struct fc_vport *fc_vport)
 	clear_bit(vha->vp_idx, ha->vp_idx_map);
 	mutex_unlock(&ha->vport_lock);
 
-	if (vha->req->id && !ha->flags.cpu_affinity_enabled) {
-		if (qla25xx_delete_req_que(vha, vha->req) != QLA_SUCCESS)
+	dma_free_coherent(&ha->pdev->dev, vha->gnl.size, vha->gnl.l,
+	    vha->gnl.ldma);
+
+	vfree(vha->scan.l);
+
+	if (vha->qpair && vha->qpair->vp_idx == vha->vp_idx) {
+		if (qla2xxx_delete_qpair(vha, vha->qpair) != QLA_SUCCESS)
 			ql_log(ql_log_warn, vha, 0x7087,
-			    "Queue delete failed.\n");
+			    "Queue Pair delete failed.\n");
 	}
 
 	ql_log(ql_log_info, vha, 0x7088, "VP[%d] deleted.\n", id);
@@ -2287,7 +2318,7 @@ qla2x00_init_host_attr(scsi_qla_host_t *vha)
 	fc_host_dev_loss_tmo(vha->host) = ha->port_down_retry_count;
 	fc_host_node_name(vha->host) = wwn_to_u64(vha->node_name);
 	fc_host_port_name(vha->host) = wwn_to_u64(vha->port_name);
-	fc_host_supported_classes(vha->host) = ha->tgt.enable_class_2 ?
+	fc_host_supported_classes(vha->host) = ha->base_qpair->enable_class_2 ?
 			(FC_COS_CLASS2|FC_COS_CLASS3) : FC_COS_CLASS3;
 	fc_host_max_npiv_vports(vha->host) = ha->max_npiv_vports;
 	fc_host_npiv_vports_inuse(vha->host) = ha->cur_vport_count;

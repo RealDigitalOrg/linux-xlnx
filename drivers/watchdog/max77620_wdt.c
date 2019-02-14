@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/mfd/max77620.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -201,10 +202,11 @@ static int max77620_wdt_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static struct platform_device_id max77620_wdt_devtype[] = {
+static const struct platform_device_id max77620_wdt_devtype[] = {
 	{ .name = "max77620-watchdog", },
 	{ },
 };
+MODULE_DEVICE_TABLE(platform, max77620_wdt_devtype);
 
 static struct platform_driver max77620_wdt_driver = {
 	.driver	= {

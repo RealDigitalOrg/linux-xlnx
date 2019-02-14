@@ -13,8 +13,10 @@
 
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/mm_types.h>
 #include <linux/smp.h>
 #include <linux/slab.h>
+
 #include <asm/cacheflush.h>
 #include <asm/dsemul.h>
 #include <asm/hazards.h>
@@ -29,9 +31,12 @@ do {									\
 	}								\
 } while (0)
 
+extern void tlbmiss_handler_setup_pgd(unsigned long);
+extern char tlbmiss_handler_setup_pgd_end[];
+
+/* Note: This is also implemented with uasm in arch/mips/kvm/entry.c */
 #define TLBMISS_HANDLER_SETUP_PGD(pgd)					\
 do {									\
-	extern void tlbmiss_handler_setup_pgd(unsigned long);		\
 	tlbmiss_handler_setup_pgd((unsigned long)(pgd));		\
 	htw_set_pwbase((unsigned long)pgd);				\
 } while (0)
@@ -97,17 +102,12 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 static inline void
 get_new_mmu_context(struct mm_struct *mm, unsigned long cpu)
 {
-	extern void kvm_local_flush_tlb_all(void);
 	unsigned long asid = asid_cache(cpu);
 
 	if (!((asid += cpu_asid_inc()) & cpu_asid_mask(&cpu_data[cpu]))) {
 		if (cpu_has_vtag_icache)
 			flush_icache_all();
-#ifdef CONFIG_KVM
-		kvm_local_flush_tlb_all();      /* start new asid cycle */
-#else
 		local_flush_tlb_all();	/* start new asid cycle */
-#endif
 		if (!asid)		/* fix version if needed */
 			asid = asid_first_version(cpu);
 	}
@@ -126,8 +126,6 @@ init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 
 	for_each_possible_cpu(i)
 		cpu_context(i, mm) = 0;
-
-	atomic_set(&mm->context.fp_mode_switching, 0);
 
 	mm->context.bd_emupage_allocmap = NULL;
 	spin_lock_init(&mm->context.bd_emupage_lock);

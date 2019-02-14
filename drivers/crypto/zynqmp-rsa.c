@@ -1,15 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (C) 2017 Xilinx, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -24,10 +15,11 @@
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
 #include <crypto/scatterwalk.h>
-#include <linux/soc/xilinx/zynqmp/firmware.h>
+#include <linux/firmware/xilinx/zynqmp/firmware.h>
 
 #define ZYNQMP_RSA_QUEUE_LENGTH	1
 #define ZYNQMP_RSA_MAX_KEY_SIZE	1024
+#define ZYNQMP_BLOCKSIZE	64
 
 struct zynqmp_rsa_dev;
 
@@ -90,38 +82,59 @@ static int zynqmp_setkey_blk(struct crypto_tfm *tfm, const u8 *key,
 	return 0;
 }
 
+static int zynqmp_rsa_xcrypt(struct blkcipher_desc *desc,
+			     struct scatterlist *dst, struct scatterlist *src,
+			     unsigned int nbytes, unsigned int flags)
+{
+	struct zynqmp_rsa_op *op = crypto_blkcipher_ctx(desc->tfm);
+	struct zynqmp_rsa_dev *dd = zynqmp_rsa_find_dev(op);
+	const struct zynqmp_eemi_ops *eemi_ops = zynqmp_pm_get_eemi_ops();
+	int err, datasize, src_data = 0, dst_data = 0;
+	struct blkcipher_walk walk;
+	char *kbuf;
+	size_t dma_size;
+	dma_addr_t dma_addr;
+
+	if (!eemi_ops || !eemi_ops->rsa)
+		return -ENOTSUPP;
+
+	dma_size = nbytes + op->keylen;
+	kbuf = dma_alloc_coherent(dd->dev, dma_size, &dma_addr, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	blkcipher_walk_init(&walk, dst, src, nbytes);
+	err = blkcipher_walk_virt(desc, &walk);
+
+	while ((datasize = walk.nbytes)) {
+		op->src = walk.src.virt.addr;
+		memcpy(kbuf + src_data, op->src, datasize);
+		src_data = src_data + datasize;
+		datasize &= (ZYNQMP_BLOCKSIZE - 1);
+		err = blkcipher_walk_done(desc, &walk, datasize);
+	}
+	memcpy(kbuf + nbytes, op->key, op->keylen);
+	eemi_ops->rsa(dma_addr, nbytes, flags);
+
+	blkcipher_walk_init(&walk, dst, src, nbytes);
+	err = blkcipher_walk_virt(desc, &walk);
+
+	while ((datasize = walk.nbytes)) {
+		memcpy(walk.dst.virt.addr, kbuf + dst_data, datasize);
+		dst_data = dst_data + datasize;
+		datasize &= (ZYNQMP_BLOCKSIZE - 1);
+		err = blkcipher_walk_done(desc, &walk, datasize);
+	}
+	dma_free_coherent(dd->dev, dma_size, kbuf, dma_addr);
+	return err;
+}
+
 static int
 zynqmp_rsa_decrypt(struct blkcipher_desc *desc,
 		   struct scatterlist *dst, struct scatterlist *src,
 		   unsigned int nbytes)
 {
-	struct zynqmp_rsa_op *op = crypto_blkcipher_ctx(desc->tfm);
-	struct zynqmp_rsa_dev *dd = zynqmp_rsa_find_dev(op);
-	struct blkcipher_walk walk;
-	char *kbuf;
-	size_t dma_size;
-	dma_addr_t dma_addr;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	op->iv = walk.iv;
-	op->src = walk.src.virt.addr;
-	op->dst = walk.dst.virt.addr;
-
-	dma_size = nbytes + op->keylen;
-	kbuf = dma_alloc_coherent(dd->dev, dma_size, &dma_addr, GFP_KERNEL);
-	if (!kbuf)
-	return -ENOMEM;
-
-	memcpy(kbuf, op->src, nbytes);
-	memcpy(kbuf + nbytes, op->key, op->keylen);
-	zynqmp_pm_rsa(dma_addr, nbytes, 0);
-	memcpy(walk.dst.virt.addr, kbuf, nbytes);
-	err = blkcipher_walk_done(desc, &walk, nbytes  - 1);
-	dma_free_coherent(dd->dev, dma_size, kbuf, dma_addr);
-
-	return err;
+	return zynqmp_rsa_xcrypt(desc, dst, src, nbytes, 0);
 }
 
 static int
@@ -129,50 +142,24 @@ zynqmp_rsa_encrypt(struct blkcipher_desc *desc,
 		   struct scatterlist *dst, struct scatterlist *src,
 		   unsigned int nbytes)
 {
-	struct zynqmp_rsa_op *op = crypto_blkcipher_ctx(desc->tfm);
-	struct zynqmp_rsa_dev *dd = zynqmp_rsa_find_dev(op);
-	struct blkcipher_walk walk;
-	char *kbuf;
-	size_t dma_size;
-	dma_addr_t dma_addr;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	op->iv = walk.iv;
-	op->src = walk.src.virt.addr;
-	op->dst = walk.dst.virt.addr;
-
-	dma_size = nbytes + op->keylen;
-	kbuf = dma_alloc_coherent(dd->dev, dma_size, &dma_addr, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
-
-	memcpy(kbuf, op->src, nbytes);
-	memcpy(kbuf + nbytes, op->key, op->keylen);
-	zynqmp_pm_rsa(dma_addr, nbytes, 1);
-	memcpy(walk.dst.virt.addr, kbuf, nbytes);
-	err = blkcipher_walk_done(desc, &walk, nbytes  - 1);
-	dma_free_coherent(dd->dev, dma_size, kbuf, dma_addr);
-
-	return err;
+	return zynqmp_rsa_xcrypt(desc, dst, src, nbytes, 1);
 }
 
 static struct crypto_alg zynqmp_alg = {
 	.cra_name		=	"xilinx-zynqmp-rsa",
-	.cra_driver_name        =	"zynqmp-rsa",
-	.cra_priority           =       400,
+	.cra_driver_name	=	"zynqmp-rsa",
+	.cra_priority		=	400,
 	.cra_flags		=	CRYPTO_ALG_TYPE_BLKCIPHER |
 					CRYPTO_ALG_KERN_DRIVER_ONLY,
-	.cra_blocksize		=	1,
+	.cra_blocksize		=	ZYNQMP_BLOCKSIZE,
 	.cra_ctxsize		=	sizeof(struct zynqmp_rsa_op),
 	.cra_alignmask		=	15,
 	.cra_type		=	&crypto_blkcipher_type,
 	.cra_module		=	THIS_MODULE,
 	.cra_u			=	{
-	.blkcipher      =       {
+	.blkcipher = {
 			.min_keysize	=	0,
-			.max_keysize    =       ZYNQMP_RSA_MAX_KEY_SIZE,
+			.max_keysize	=	ZYNQMP_RSA_MAX_KEY_SIZE,
 			.setkey		=	zynqmp_setkey_blk,
 			.encrypt	=	zynqmp_rsa_encrypt,
 			.decrypt	=	zynqmp_rsa_decrypt,
@@ -203,7 +190,7 @@ static int zynqmp_rsa_probe(struct platform_device *pdev)
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(44));
 	if (ret < 0)
-	dev_err(dev, "no usable DMA configuration");
+		dev_err(dev, "no usable DMA configuration");
 
 	INIT_LIST_HEAD(&rsa_dd->list);
 	spin_lock_init(&rsa_dd->lock);
@@ -235,8 +222,8 @@ static int zynqmp_rsa_remove(struct platform_device *pdev)
 static struct platform_driver xilinx_rsa_driver = {
 	.probe = zynqmp_rsa_probe,
 	.remove = zynqmp_rsa_remove,
-	.driver         = {
-		.name   = "zynqmp_rsa",
+	.driver = {
+		.name = "zynqmp_rsa",
 		.of_match_table = of_match_ptr(zynqmp_rsa_dt_ids),
 	},
 };

@@ -30,8 +30,6 @@
  * SOFTWARE.
  */
 
-#ifdef CONFIG_RFS_ACCEL
-
 #include <linux/hash.h>
 #include <linux/mlx5/fs.h>
 #include <linux/ip.h>
@@ -56,7 +54,7 @@ struct arfs_tuple {
 struct arfs_rule {
 	struct mlx5e_priv	*priv;
 	struct work_struct      arfs_work;
-	struct mlx5_flow_rule   *rule;
+	struct mlx5_flow_handle *rule;
 	struct hlist_node	hlist;
 	int			rxq;
 	/* Flow ID passed to ndo_rx_flow_steer */
@@ -92,7 +90,7 @@ static enum mlx5e_traffic_types arfs_get_tt(enum arfs_type type)
 
 static int arfs_disable(struct mlx5e_priv *priv)
 {
-	struct mlx5_flow_destination dest;
+	struct mlx5_flow_destination dest = {};
 	struct mlx5e_tir *tir = priv->indir_tir;
 	int err = 0;
 	int tt;
@@ -104,7 +102,7 @@ static int arfs_disable(struct mlx5e_priv *priv)
 		tt = arfs_get_tt(i);
 		/* Modify ttc rules destination to bypass the aRFS tables*/
 		err = mlx5_modify_rule_destination(priv->fs.ttc.rules[tt],
-						   &dest);
+						   &dest, NULL);
 		if (err) {
 			netdev_err(priv->netdev,
 				   "%s: modify ttc destination failed\n",
@@ -126,7 +124,7 @@ int mlx5e_arfs_disable(struct mlx5e_priv *priv)
 
 int mlx5e_arfs_enable(struct mlx5e_priv *priv)
 {
-	struct mlx5_flow_destination dest;
+	struct mlx5_flow_destination dest = {};
 	int err = 0;
 	int tt;
 	int i;
@@ -137,7 +135,7 @@ int mlx5e_arfs_enable(struct mlx5e_priv *priv)
 		tt = arfs_get_tt(i);
 		/* Modify ttc rules destination to point on the aRFS FTs */
 		err = mlx5_modify_rule_destination(priv->fs.ttc.rules[tt],
-						   &dest);
+						   &dest, NULL);
 		if (err) {
 			netdev_err(priv->netdev,
 				   "%s: modify ttc destination failed err=%d\n",
@@ -151,7 +149,7 @@ int mlx5e_arfs_enable(struct mlx5e_priv *priv)
 
 static void arfs_destroy_table(struct arfs_table *arfs_t)
 {
-	mlx5_del_flow_rule(arfs_t->default_rule);
+	mlx5_del_flow_rules(arfs_t->default_rule);
 	mlx5e_destroy_flow_table(&arfs_t->ft);
 }
 
@@ -174,41 +172,33 @@ static int arfs_add_default_rule(struct mlx5e_priv *priv,
 				 enum arfs_type type)
 {
 	struct arfs_table *arfs_t = &priv->fs.arfs.arfs_tables[type];
-	struct mlx5_flow_destination dest;
 	struct mlx5e_tir *tir = priv->indir_tir;
+	struct mlx5_flow_destination dest = {};
+	MLX5_DECLARE_FLOW_ACT(flow_act);
 	struct mlx5_flow_spec *spec;
+	enum mlx5e_traffic_types tt;
 	int err = 0;
 
-	spec = mlx5_vzalloc(sizeof(*spec));
+	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec) {
-		netdev_err(priv->netdev, "%s: alloc failed\n", __func__);
 		err = -ENOMEM;
 		goto out;
 	}
 
 	dest.type = MLX5_FLOW_DESTINATION_TYPE_TIR;
-	switch (type) {
-	case ARFS_IPV4_TCP:
-		dest.tir_num = tir[MLX5E_TT_IPV4_TCP].tirn;
-		break;
-	case ARFS_IPV4_UDP:
-		dest.tir_num = tir[MLX5E_TT_IPV4_UDP].tirn;
-		break;
-	case ARFS_IPV6_TCP:
-		dest.tir_num = tir[MLX5E_TT_IPV6_TCP].tirn;
-		break;
-	case ARFS_IPV6_UDP:
-		dest.tir_num = tir[MLX5E_TT_IPV6_UDP].tirn;
-		break;
-	default:
+	tt = arfs_get_tt(type);
+	if (tt == -EINVAL) {
+		netdev_err(priv->netdev, "%s: bad arfs_type: %d\n",
+			   __func__, type);
 		err = -EINVAL;
 		goto out;
 	}
 
-	arfs_t->default_rule = mlx5_add_flow_rule(arfs_t->ft.t, spec,
-						  MLX5_FLOW_CONTEXT_ACTION_FWD_DEST,
-						  MLX5_FS_DEFAULT_FLOW_TAG,
-						  &dest);
+	dest.tir_num = tir[tt].tirn;
+
+	arfs_t->default_rule = mlx5_add_flow_rules(arfs_t->ft.t, spec,
+						   &flow_act,
+						   &dest, 1);
 	if (IS_ERR(arfs_t->default_rule)) {
 		err = PTR_ERR(arfs_t->default_rule);
 		arfs_t->default_rule = NULL;
@@ -221,7 +211,7 @@ out:
 }
 
 #define MLX5E_ARFS_NUM_GROUPS	2
-#define MLX5E_ARFS_GROUP1_SIZE	BIT(12)
+#define MLX5E_ARFS_GROUP1_SIZE	(BIT(16) - 1)
 #define MLX5E_ARFS_GROUP2_SIZE	BIT(0)
 #define MLX5E_ARFS_TABLE_SIZE	(MLX5E_ARFS_GROUP1_SIZE +\
 				 MLX5E_ARFS_GROUP2_SIZE)
@@ -237,7 +227,7 @@ static int arfs_create_groups(struct mlx5e_flow_table *ft,
 
 	ft->g = kcalloc(MLX5E_ARFS_NUM_GROUPS,
 			sizeof(*ft->g), GFP_KERNEL);
-	in = mlx5_vzalloc(inlen);
+	in = kvzalloc(inlen, GFP_KERNEL);
 	if  (!in || !ft->g) {
 		kvfree(ft->g);
 		kvfree(in);
@@ -321,10 +311,16 @@ static int arfs_create_table(struct mlx5e_priv *priv,
 {
 	struct mlx5e_arfs_tables *arfs = &priv->fs.arfs;
 	struct mlx5e_flow_table *ft = &arfs->arfs_tables[type].ft;
+	struct mlx5_flow_table_attr ft_attr = {};
 	int err;
 
-	ft->t = mlx5_create_flow_table(priv->fs.ns, MLX5E_NIC_PRIO,
-				       MLX5E_ARFS_TABLE_SIZE, MLX5E_ARFS_FT_LEVEL);
+	ft->num_groups = 0;
+
+	ft_attr.max_fte = MLX5E_ARFS_TABLE_SIZE;
+	ft_attr.level = MLX5E_ARFS_FT_LEVEL;
+	ft_attr.prio = MLX5E_NIC_PRIO;
+
+	ft->t = mlx5_create_flow_table(priv->fs.ns, &ft_attr);
 	if (IS_ERR(ft->t)) {
 		err = PTR_ERR(ft->t);
 		ft->t = NULL;
@@ -383,20 +379,20 @@ static void arfs_may_expire_flow(struct mlx5e_priv *priv)
 	HLIST_HEAD(del_list);
 	spin_lock_bh(&priv->fs.arfs.arfs_lock);
 	mlx5e_for_each_arfs_rule(arfs_rule, htmp, priv->fs.arfs.arfs_tables, i, j) {
-		if (quota++ > MLX5E_ARFS_EXPIRY_QUOTA)
-			break;
 		if (!work_pending(&arfs_rule->arfs_work) &&
 		    rps_may_expire_flow(priv->netdev,
 					arfs_rule->rxq, arfs_rule->flow_id,
 					arfs_rule->filter_id)) {
 			hlist_del_init(&arfs_rule->hlist);
 			hlist_add_head(&arfs_rule->hlist, &del_list);
+			if (quota++ > MLX5E_ARFS_EXPIRY_QUOTA)
+				break;
 		}
 	}
 	spin_unlock_bh(&priv->fs.arfs.arfs_lock);
 	hlist_for_each_entry_safe(arfs_rule, htmp, &del_list, hlist) {
 		if (arfs_rule->rule)
-			mlx5_del_flow_rule(arfs_rule->rule);
+			mlx5_del_flow_rules(arfs_rule->rule);
 		hlist_del(&arfs_rule->hlist);
 		kfree(arfs_rule);
 	}
@@ -420,7 +416,7 @@ static void arfs_del_rules(struct mlx5e_priv *priv)
 	hlist_for_each_entry_safe(rule, htmp, &del_list, hlist) {
 		cancel_work_sync(&rule->arfs_work);
 		if (rule->rule)
-			mlx5_del_flow_rule(rule->rule);
+			mlx5_del_flow_rules(rule->rule);
 		hlist_del(&rule->hlist);
 		kfree(rule);
 	}
@@ -462,21 +458,21 @@ static struct arfs_table *arfs_get_table(struct mlx5e_arfs_tables *arfs,
 	return NULL;
 }
 
-static struct mlx5_flow_rule *arfs_add_rule(struct mlx5e_priv *priv,
-					    struct arfs_rule *arfs_rule)
+static struct mlx5_flow_handle *arfs_add_rule(struct mlx5e_priv *priv,
+					      struct arfs_rule *arfs_rule)
 {
 	struct mlx5e_arfs_tables *arfs = &priv->fs.arfs;
 	struct arfs_tuple *tuple = &arfs_rule->tuple;
-	struct mlx5_flow_rule *rule = NULL;
-	struct mlx5_flow_destination dest;
+	struct mlx5_flow_handle *rule = NULL;
+	struct mlx5_flow_destination dest = {};
+	MLX5_DECLARE_FLOW_ACT(flow_act);
 	struct arfs_table *arfs_table;
 	struct mlx5_flow_spec *spec;
 	struct mlx5_flow_table *ft;
 	int err = 0;
 
-	spec = mlx5_vzalloc(sizeof(*spec));
+	spec = kvzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec) {
-		netdev_err(priv->netdev, "%s: alloc failed\n", __func__);
 		err = -ENOMEM;
 		goto out;
 	}
@@ -544,9 +540,7 @@ static struct mlx5_flow_rule *arfs_add_rule(struct mlx5e_priv *priv,
 	}
 	dest.type = MLX5_FLOW_DESTINATION_TYPE_TIR;
 	dest.tir_num = priv->direct_tir[arfs_rule->rxq].tirn;
-	rule = mlx5_add_flow_rule(ft, spec, MLX5_FLOW_CONTEXT_ACTION_FWD_DEST,
-				  MLX5_FS_DEFAULT_FLOW_TAG,
-				  &dest);
+	rule = mlx5_add_flow_rules(ft, spec, &flow_act, &dest, 1);
 	if (IS_ERR(rule)) {
 		err = PTR_ERR(rule);
 		netdev_err(priv->netdev, "%s: add rule(filter id=%d, rq idx=%d) failed, err=%d\n",
@@ -559,17 +553,17 @@ out:
 }
 
 static void arfs_modify_rule_rq(struct mlx5e_priv *priv,
-				struct mlx5_flow_rule *rule, u16 rxq)
+				struct mlx5_flow_handle *rule, u16 rxq)
 {
-	struct mlx5_flow_destination dst;
+	struct mlx5_flow_destination dst = {};
 	int err = 0;
 
 	dst.type = MLX5_FLOW_DESTINATION_TYPE_TIR;
 	dst.tir_num = priv->direct_tir[rxq].tirn;
-	err =  mlx5_modify_rule_destination(rule, &dst);
+	err =  mlx5_modify_rule_destination(rule, &dst, NULL);
 	if (err)
 		netdev_warn(priv->netdev,
-			    "Failed to modfiy aRFS rule destination to rq=%d\n", rxq);
+			    "Failed to modify aRFS rule destination to rq=%d\n", rxq);
 }
 
 static void arfs_handle_work(struct work_struct *work)
@@ -578,7 +572,7 @@ static void arfs_handle_work(struct work_struct *work)
 						   struct arfs_rule,
 						   arfs_work);
 	struct mlx5e_priv *priv = arfs_rule->priv;
-	struct mlx5_flow_rule *rule;
+	struct mlx5_flow_handle *rule;
 
 	mutex_lock(&priv->state_lock);
 	if (!test_bit(MLX5E_STATE_OPENED, &priv->state)) {
@@ -715,6 +709,9 @@ int mlx5e_rx_flow_steer(struct net_device *dev, const struct sk_buff *skb,
 	    skb->protocol != htons(ETH_P_IPV6))
 		return -EPROTONOSUPPORT;
 
+	if (skb->encapsulation)
+		return -EPROTONOSUPPORT;
+
 	arfs_t = arfs_get_table(arfs, arfs_get_ip_proto(skb), skb->protocol);
 	if (!arfs_t)
 		return -EPROTONOSUPPORT;
@@ -739,4 +736,4 @@ int mlx5e_rx_flow_steer(struct net_device *dev, const struct sk_buff *skb,
 	spin_unlock_bh(&arfs->arfs_lock);
 	return arfs_rule->filter_id;
 }
-#endif
+

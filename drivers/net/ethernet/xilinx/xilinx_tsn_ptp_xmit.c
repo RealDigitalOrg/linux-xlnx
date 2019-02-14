@@ -92,6 +92,15 @@ static void memcpy_toio_32(struct axienet_local *lp,
 	}
 }
 
+static int is_sync(struct sk_buff *skb)
+{
+	u8 *msg_type;
+
+	msg_type = (u8 *)skb->data + ETH_HLEN;
+
+	return (*msg_type & 0xf) == PTP_TYPE_SYNC;
+}
+
 /**
  * axienet_ptp_xmit - xmit skb using PTP HW
  * @skb:	sk_buff pointer that contains data to be Txed.
@@ -110,6 +119,8 @@ int axienet_ptp_xmit(struct sk_buff *skb, struct net_device *ndev)
 	unsigned long flags;
 	u8 tx_frame_waiting;
 	u8 free_index;
+	u32 cmd1_field = 0;
+	u32 cmd2_field = 0;
 
 	msg_type  = *(u8 *)(skb->data + ETH_HLEN);
 
@@ -133,22 +144,38 @@ int axienet_ptp_xmit(struct sk_buff *skb, struct net_device *ndev)
 	free_index  = fls(tx_frame_waiting);
 
 	/* write the len */
-	axienet_iow(lp, PTP_TX_BUFFER_OFFSET(free_index), skb->len);
-	memcpy_toio_32(lp, (PTP_TX_BUFFER_OFFSET(free_index) + 8),
+	if (lp->ptp_ts_type == HWTSTAMP_TX_ONESTEP_SYNC &&
+	    is_sync(skb)) {
+		/* enable 1STEP SYNC */
+		cmd1_field |= PTP_TX_CMD_1STEP_SHIFT;
+		cmd2_field |= PTP_TOD_FIELD_OFFSET;
+	}
+
+	cmd1_field |= skb->len;
+
+	axienet_iow(lp, PTP_TX_BUFFER_OFFSET(free_index), cmd1_field);
+	axienet_iow(lp, PTP_TX_BUFFER_OFFSET(free_index) +
+			PTP_TX_BUFFER_CMD2_FIELD, cmd2_field);
+	memcpy_toio_32(lp,
+		       (PTP_TX_BUFFER_OFFSET(free_index) +
+			PTP_TX_CMD_FIELD_LEN),
 		       skb->data, skb->len);
 
 	/* send the frame */
 	axienet_iow(lp, PTP_TX_CONTROL_OFFSET, (1 << free_index));
 
-	spin_lock_irqsave(&lp->ptp_tx_lock, flags);
-	skb->cb[0] = free_index;
-	skb_queue_tail(&lp->ptp_txq, skb_get(skb));
-	skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
-	skb_tx_timestamp(skb);
-	spin_unlock_irqrestore(&lp->ptp_tx_lock, flags);
+	if (lp->ptp_ts_type != HWTSTAMP_TX_ONESTEP_SYNC ||
+	    (!is_sync(skb))) {
+		spin_lock_irqsave(&lp->ptp_tx_lock, flags);
+		skb->cb[0] = free_index;
+		skb_queue_tail(&lp->ptp_txq, skb);
 
-	dev_kfree_skb_any(skb);
+		if (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)
+			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
 
+		skb_tx_timestamp(skb);
+		spin_unlock_irqrestore(&lp->ptp_tx_lock, flags);
+	}
 	return NETDEV_TX_OK;
 }
 
@@ -192,6 +219,8 @@ static void axienet_ptp_recv(struct net_device *ndev)
 	struct sk_buff *skb;
 	u16 msg_len;
 	u8 msg_type;
+	u32 bytes = 0;
+	u32 packets = 0;
 
 	pr_debug("%s:\n ", __func__);
 
@@ -215,18 +244,26 @@ static void axienet_ptp_recv(struct net_device *ndev)
 
 		skb_put(skb, ntohs(msg_len) + ETH_HLEN);
 
+		bytes += skb->len;
+		packets++;
+
 		skb->protocol = eth_type_trans(skb, ndev);
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 		pr_debug("  -->RECV: protocol: %x message: %s frame_len: %d\n",
 			 skb->protocol, msg_type_string(msg_type & 0xf),
 			 skb->len);
-		axienet_set_timestamp(lp, skb_hwtstamps(skb),
-				      (ptp_frame_base_addr
-				      + PTP_HW_TSTAMP_OFFSET));
+		/* timestamp only event messages */
+		if (!(msg_type & PTP_MSG_TYPE_MASK)) {
+			axienet_set_timestamp(lp, skb_hwtstamps(skb),
+					      (ptp_frame_base_addr +
+					      PTP_HW_TSTAMP_OFFSET));
+		}
 
 		netif_rx(skb);
 	}
+	ndev->stats.rx_packets += packets;
+	ndev->stats.rx_bytes += bytes;
 }
 
 /**
@@ -260,12 +297,15 @@ void axienet_tx_tstamp(struct work_struct *work)
 {
 	struct axienet_local *lp = container_of(work, struct axienet_local,
 			tx_tstamp_work);
+	struct net_device *ndev = lp->ndev;
 	struct skb_shared_hwtstamps hwtstamps;
 	struct sk_buff *skb;
 	unsigned long ts_reg_offset;
 	unsigned long flags;
 	u8 tx_packet;
 	u8 index;
+	u32 bytes = 0;
+	u32 packets = 0;
 
 	memset(&hwtstamps, 0, sizeof(struct skb_shared_hwtstamps));
 
@@ -288,12 +328,17 @@ void axienet_tx_tstamp(struct work_struct *work)
 		ts_reg_offset = PTP_TX_BUFFER_OFFSET(index) +
 					PTP_HW_TSTAMP_OFFSET;
 
-		axienet_set_timestamp(lp, &hwtstamps, ts_reg_offset);
+		if (skb_shinfo(skb)->tx_flags & SKBTX_IN_PROGRESS) {
+			axienet_set_timestamp(lp, &hwtstamps, ts_reg_offset);
+			skb_tstamp_tx(skb, &hwtstamps);
+		}
 
-		skb_tstamp_tx(skb, &hwtstamps);
-
+		bytes += skb->len;
+		packets++;
 		dev_kfree_skb_any(skb);
 	}
+	ndev->stats.tx_packets += packets;
+	ndev->stats.tx_bytes += bytes;
 
 	spin_unlock_irqrestore(&lp->ptp_tx_lock, flags);
 }

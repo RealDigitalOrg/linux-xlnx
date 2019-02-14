@@ -379,15 +379,13 @@ static int ab8500_fg_is_low_curr(struct ab8500_fg *di, int curr)
  */
 static int ab8500_fg_add_cap_sample(struct ab8500_fg *di, int sample)
 {
-	struct timespec64 ts64;
+	time64_t now = ktime_get_boottime_seconds();
 	struct ab8500_fg_avg_cap *avg = &di->avg_cap;
-
-	getnstimeofday64(&ts64);
 
 	do {
 		avg->sum += sample - avg->samples[avg->pos];
 		avg->samples[avg->pos] = sample;
-		avg->time_stamps[avg->pos] = ts64.tv_sec;
+		avg->time_stamps[avg->pos] = now;
 		avg->pos++;
 
 		if (avg->pos == NBR_AVG_SAMPLES)
@@ -400,7 +398,7 @@ static int ab8500_fg_add_cap_sample(struct ab8500_fg *di, int sample)
 		 * Check the time stamp for each sample. If too old,
 		 * replace with latest sample
 		 */
-	} while (ts64.tv_sec - VALID_CAPACITY_SEC > avg->time_stamps[avg->pos]);
+	} while (now - VALID_CAPACITY_SEC > avg->time_stamps[avg->pos]);
 
 	avg->avg = avg->sum / avg->nbr_samples;
 
@@ -439,14 +437,14 @@ static void ab8500_fg_clear_cap_samples(struct ab8500_fg *di)
 static void ab8500_fg_fill_cap_sample(struct ab8500_fg *di, int sample)
 {
 	int i;
-	struct timespec64 ts64;
+	time64_t now;
 	struct ab8500_fg_avg_cap *avg = &di->avg_cap;
 
-	getnstimeofday64(&ts64);
+	now = ktime_get_boottime_seconds();
 
 	for (i = 0; i < NBR_AVG_SAMPLES; i++) {
 		avg->samples[i] = sample;
-		avg->time_stamps[i] = ts64.tv_sec;
+		avg->time_stamps[i] = now;
 	}
 
 	avg->pos = 0;
@@ -1408,7 +1406,7 @@ static void ab8500_fg_charge_state_to(struct ab8500_fg *di,
 static void ab8500_fg_discharge_state_to(struct ab8500_fg *di,
 	enum ab8500_fg_discharge_state new_state)
 {
-	dev_dbg(di->dev, "Disharge state from %d [%s] to %d [%s]\n",
+	dev_dbg(di->dev, "Discharge state from %d [%s] to %d [%s]\n",
 		di->discharge_state,
 		discharge_state[di->discharge_state],
 		new_state,
@@ -1900,7 +1898,7 @@ static void ab8500_fg_low_bat_work(struct work_struct *work)
  * ab8500_fg_battok_calc - calculate the bit pattern corresponding
  * to the target voltage.
  * @di:       pointer to the ab8500_fg structure
- * @target    target voltage
+ * @target:   target voltage
  *
  * Returns bit pattern closest to the target voltage
  * valid return values are 0-14. (0-BATT_OK_MAX_NR_INCREMENTS)
@@ -2326,9 +2324,7 @@ static int ab8500_fg_init_hw_registers(struct ab8500_fg *di)
 		goto out;
 	}
 
-	if (((is_ab8505(di->parent) || is_ab9540(di->parent)) &&
-			abx500_get_chip_id(di->dev) >= AB8500_CUT2P0)
-			|| is_ab8540(di->parent)) {
+	if (is_ab8505(di->parent)) {
 		ret = abx500_set_register_interruptible(di->dev, AB8500_RTC,
 			AB8505_RTC_PCUT_MAX_TIME_REG, di->bm->fg_params->pcut_max_time);
 
@@ -2391,7 +2387,7 @@ static void ab8500_fg_external_power_changed(struct power_supply *psy)
 }
 
 /**
- * abab8500_fg_reinit_work() - work to reset the FG algorithm
+ * ab8500_fg_reinit_work() - work to reset the FG algorithm
  * @work:	pointer to the work_struct structure
  *
  * Used to reset the current battery capacity to be able to
@@ -2528,7 +2524,7 @@ static struct kobj_type ab8500_fg_ktype = {
 };
 
 /**
- * ab8500_chargalg_sysfs_exit() - de-init of sysfs entry
+ * ab8500_fg_sysfs_exit() - de-init of sysfs entry
  * @di:                pointer to the struct ab8500_chargalg
  *
  * This function removes the entry in sysfs.
@@ -2539,7 +2535,7 @@ static void ab8500_fg_sysfs_exit(struct ab8500_fg *di)
 }
 
 /**
- * ab8500_chargalg_sysfs_init() - init of sysfs entry
+ * ab8500_fg_sysfs_init() - init of sysfs entry
  * @di:                pointer to the struct ab8500_chargalg
  *
  * This function adds an entry in sysfs.
@@ -2915,9 +2911,7 @@ static int ab8500_fg_sysfs_psy_create_attrs(struct ab8500_fg *di)
 {
 	unsigned int i;
 
-	if (((is_ab8505(di->parent) || is_ab9540(di->parent)) &&
-	     abx500_get_chip_id(di->dev) >= AB8500_CUT2P0)
-	    || is_ab8540(di->parent)) {
+	if (is_ab8505(di->parent)) {
 		for (i = 0; i < ARRAY_SIZE(ab8505_fg_sysfs_psy_attrs); i++)
 			if (device_create_file(&di->fg_psy->dev,
 					       &ab8505_fg_sysfs_psy_attrs[i]))
@@ -2937,9 +2931,7 @@ static void ab8500_fg_sysfs_psy_remove_attrs(struct ab8500_fg *di)
 {
 	unsigned int i;
 
-	if (((is_ab8505(di->parent) || is_ab9540(di->parent)) &&
-	     abx500_get_chip_id(di->dev) >= AB8500_CUT2P0)
-	    || is_ab8540(di->parent)) {
+	if (is_ab8505(di->parent)) {
 		for (i = 0; i < ARRAY_SIZE(ab8505_fg_sysfs_psy_attrs); i++)
 			(void)device_remove_file(&di->fg_psy->dev,
 						 &ab8505_fg_sysfs_psy_attrs[i]);

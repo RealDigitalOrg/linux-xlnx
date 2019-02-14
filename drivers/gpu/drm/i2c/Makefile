@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+
 ccflags-y := -Iinclude/drm
 
 obj-$(CONFIG_DRM_I2C_ADV7511_LEGACY) += adv7511.o
@@ -10,3 +12,4 @@ obj-$(CONFIG_DRM_I2C_SIL164) += sil164.o
 
 tda998x-y := tda998x_drv.o
 obj-$(CONFIG_DRM_I2C_NXP_TDA998X) += tda998x.o
+obj-$(CONFIG_DRM_I2C_NXP_TDA9950) += tda9950.o

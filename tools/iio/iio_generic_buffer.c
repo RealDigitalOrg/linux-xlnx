@@ -247,7 +247,8 @@ void print_usage(void)
 	fprintf(stderr, "Usage: generic_buffer [options]...\n"
 		"Capture, convert and output data from IIO device buffer\n"
 		"  -a         Auto-activate all available channels\n"
-		"  -c <n>     Do n conversions\n"
+		"  -A         Force-activate ALL channels\n"
+		"  -c <n>     Do n conversions, or loop forever if n < 0\n"
 		"  -e         Disable wait for event (new data)\n"
 		"  -g         Use trigger-less mode\n"
 		"  -l <n>     Set buffer length to n samples\n"
@@ -329,11 +330,14 @@ static const struct option longopts[] = {
 
 int main(int argc, char **argv)
 {
-	unsigned long num_loops = 2;
+	unsigned long long num_loops = 2;
 	unsigned long timedelay = 1000000;
 	unsigned long buf_len = 128;
 
-	int ret, c, i, j, toread;
+	ssize_t i;
+	unsigned long long j;
+	unsigned long toread;
+	int ret, c;
 	int fp = -1;
 
 	int num_channels = 0;
@@ -347,19 +351,25 @@ int main(int argc, char **argv)
 	int noevents = 0;
 	int notrigger = 0;
 	char *dummy;
+	bool force_autochannels = false;
 
 	struct iio_channel_info *channels = NULL;
 
 	register_cleanup();
 
-	while ((c = getopt_long(argc, argv, "ac:egl:n:N:t:T:w:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "aAc:egl:n:N:t:T:w:?", longopts,
+				NULL)) != -1) {
 		switch (c) {
 		case 'a':
 			autochannels = AUTOCHANNELS_ENABLED;
 			break;
+		case 'A':
+			autochannels = AUTOCHANNELS_ENABLED;
+			force_autochannels = true;
+			break;	
 		case 'c':
 			errno = 0;
-			num_loops = strtoul(optarg, &dummy, 10);
+			num_loops = strtoll(optarg, &dummy, 10);
 			if (errno) {
 				ret = -errno;
 				goto error;
@@ -519,15 +529,16 @@ int main(int argc, char **argv)
 			"diag %s\n", dev_dir_name);
 		goto error;
 	}
-	if (num_channels && autochannels == AUTOCHANNELS_ENABLED) {
+	if (num_channels && autochannels == AUTOCHANNELS_ENABLED &&
+	    !force_autochannels) {
 		fprintf(stderr, "Auto-channels selected but some channels "
 			"are already activated in sysfs\n");
 		fprintf(stderr, "Proceeding without activating any channels\n");
 	}
 
-	if (!num_channels && autochannels == AUTOCHANNELS_ENABLED) {
-		fprintf(stderr,
-			"No channels are enabled, enabling all channels\n");
+	if ((!num_channels && autochannels == AUTOCHANNELS_ENABLED) ||
+	    (autochannels == AUTOCHANNELS_ENABLED && force_autochannels)) {
+		fprintf(stderr, "Enabling all channels\n");
 
 		ret = enable_disable_all_channels(dev_dir_name, 1);
 		if (ret) {
@@ -626,7 +637,7 @@ int main(int argc, char **argv)
 		goto error;
 	}
 
-	for (j = 0; j < num_loops; j++) {
+	for (j = 0; j < num_loops || num_loops < 0; j++) {
 		if (!noevents) {
 			struct pollfd pfd = {
 				.fd = fp,

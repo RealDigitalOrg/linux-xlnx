@@ -177,8 +177,15 @@ static struct clk *_of_fixed_factor_clk_setup(struct device_node *node)
 
 	clk = clk_register_fixed_factor(NULL, clk_name, parent_name, flags,
 					mult, div);
-	if (IS_ERR(clk))
+	if (IS_ERR(clk)) {
+		/*
+		 * If parent clock is not registered, registration would fail.
+		 * Clear OF_POPULATED flag so that clock registration can be
+		 * attempted again from probe function.
+		 */
+		of_node_clear_flag(node, OF_POPULATED);
 		return clk;
+	}
 
 	ret = of_clk_add_provider(node, of_clk_src_simple_get, clk);
 	if (ret) {
@@ -196,8 +203,9 @@ void __init of_fixed_factor_clk_setup(struct device_node *node)
 {
 	_of_fixed_factor_clk_setup(node);
 }
-CLK_OF_DECLARE(fixed_factor_clk, "fixed-factor-clock",
-		of_fixed_factor_clk_setup);
+
+CLK_OF_DECLARE_DRIVER(fixed_factor_clk, "fixed-factor-clock",
+		      of_fixed_factor_clk_setup);
 
 static int of_fixed_factor_clk_remove(struct platform_device *pdev)
 {

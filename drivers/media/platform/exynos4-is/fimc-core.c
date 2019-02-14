@@ -736,6 +736,7 @@ void fimc_adjust_mplane_format(struct fimc_fmt *fmt, u32 width, u32 height,
 	for (i = 0; i < pix->num_planes; ++i) {
 		struct v4l2_plane_pix_format *plane_fmt = &pix->plane_fmt[i];
 		u32 bpl = plane_fmt->bytesperline;
+		u32 sizeimage;
 
 		if (fmt->colplanes > 1 && (bpl == 0 || bpl < pix->width))
 			bpl = pix->width; /* Planar */
@@ -755,8 +756,17 @@ void fimc_adjust_mplane_format(struct fimc_fmt *fmt, u32 width, u32 height,
 			bytesperline /= 2;
 
 		plane_fmt->bytesperline = bytesperline;
-		plane_fmt->sizeimage = max((pix->width * pix->height *
-				   fmt->depth[i]) / 8, plane_fmt->sizeimage);
+		sizeimage = pix->width * pix->height * fmt->depth[i] / 8;
+
+		/* Ensure full last row for tiled formats */
+		if (tiled_fmt(fmt)) {
+			/* 64 * 32 * plane_fmt->bytesperline / 64 */
+			u32 row_size = plane_fmt->bytesperline * 32;
+
+			sizeimage = roundup(sizeimage, row_size);
+		}
+
+		plane_fmt->sizeimage = max(sizeimage, plane_fmt->sizeimage);
 	}
 }
 
@@ -1201,7 +1211,7 @@ static const struct fimc_drvdata fimc_drvdata_exynos4210 = {
 	.out_buf_count	= 32,
 };
 
-/* EXYNOS4212, EXYNOS4412 */
+/* EXYNOS4412 */
 static const struct fimc_drvdata fimc_drvdata_exynos4x12 = {
 	.num_entities	= 4,
 	.lclk_frequency	= 166000000UL,
@@ -1236,7 +1246,7 @@ static struct platform_driver fimc_driver = {
 	.driver = {
 		.of_match_table = fimc_of_match,
 		.name		= FIMC_DRIVER_NAME,
-		.pm     	= &fimc_pm_ops,
+		.pm		= &fimc_pm_ops,
 	}
 };
 

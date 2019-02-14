@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /**
  * dwc3-of-simple.c - OF glue layer for simple integrations
  *
  * Copyright (c) 2015 Texas Instruments Incorporated - http://www.ti.com
  *
  * Author: Felipe Balbi <balbi@ti.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2  of
- * the License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * This is a combination of the old dwc3-qcom.c by Ivan T. Ivanov
  * <iivanov@mm-sol.com> and the original patch adding support for Xilinx' SoC
@@ -25,7 +17,6 @@
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/clk.h>
-#include <linux/clk-provider.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
@@ -34,6 +25,7 @@
 
 #include <linux/phy/phy-zynqmp.h>
 #include <linux/of_address.h>
+#include <linux/reset.h>
 
 #include "core.h"
 
@@ -70,34 +62,15 @@ struct dwc3_of_simple {
 	int			num_clocks;
 	void __iomem		*regs;
 	struct dwc3		*dwc;
+	struct phy		*phy;
 	bool			wakeup_capable;
 	bool			dis_u3_susphy_quirk;
 	bool			enable_d3_suspend;
 	char			soc_rev;
+	struct reset_control	*resets;
+	bool			pulse_resets;
+	bool			need_reset;
 };
-
-void dwc3_set_phydata(struct device *dev, struct phy *phy)
-{
-	struct device_node *node = of_get_parent(dev->of_node);
-	int ret;
-
-	if ((node != NULL) &&
-		of_device_is_compatible(node, "xlnx,zynqmp-dwc3")) {
-		struct platform_device *pdev_parent;
-		struct dwc3_of_simple   *simple;
-
-		pdev_parent = of_find_device_by_node(node);
-		simple = platform_get_drvdata(pdev_parent);
-
-		/* assign USB vendor regs to phy lane */
-		ret = xpsgtr_set_protregs(phy, simple->regs);
-		if (ret) {
-			dev_err(&pdev_parent->dev,
-				"Not able to set PHY data\n");
-		}
-	}
-}
-EXPORT_SYMBOL(dwc3_set_phydata);
 
 int dwc3_enable_hw_coherency(struct device *dev)
 {
@@ -184,6 +157,36 @@ void dwc3_simple_wakeup_capable(struct device *dev, bool wakeup)
 }
 EXPORT_SYMBOL(dwc3_simple_wakeup_capable);
 
+static int dwc3_simple_set_phydata(struct dwc3_of_simple *simple)
+{
+	struct device		*dev = simple->dev;
+	struct device_node	*np = dev->of_node;
+	struct phy		*phy;
+
+	np = of_get_next_child(np, NULL);
+
+	if (np) {
+		phy = of_phy_get(np, "usb3-phy");
+		if (IS_ERR(phy)) {
+			dev_err(dev, "%s: Can't find usb3-phy\n", __func__);
+			return PTR_ERR(phy);
+		}
+
+		/* Store phy for future usage */
+		simple->phy = phy;
+
+		/* assign USB vendor regs addr to phy platform_data */
+		phy->dev.platform_data = simple->regs;
+
+		phy_put(phy);
+	} else {
+		dev_err(dev, "%s: Can't find child node\n", __func__);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int dwc3_of_simple_clk_init(struct dwc3_of_simple *simple, int count)
 {
 	struct device		*dev = simple->dev;
@@ -206,8 +209,10 @@ static int dwc3_of_simple_clk_init(struct dwc3_of_simple *simple, int count)
 
 		clk = of_clk_get(np, i);
 		if (IS_ERR(clk)) {
-			while (--i >= 0)
+			while (--i >= 0) {
+				clk_disable_unprepare(simple->clks[i]);
 				clk_put(simple->clks[i]);
+			}
 			return PTR_ERR(clk);
 		}
 
@@ -236,6 +241,7 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 
 	int			ret;
 	int			i;
+	bool			shared_resets = false;
 
 	simple = devm_kzalloc(dev, sizeof(*simple), GFP_KERNEL);
 	if (!simple)
@@ -287,9 +293,43 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 			kfree(soc_rev);
 	}
 
-	ret = dwc3_of_simple_clk_init(simple, of_clk_get_parent_count(np));
-	if (ret)
+	/* Set phy data for future use */
+	dwc3_simple_set_phydata(simple);
+
+	/*
+	 * Some controllers need to toggle the usb3-otg reset before trying to
+	 * initialize the PHY, otherwise the PHY times out.
+	 */
+	if (of_device_is_compatible(np, "rockchip,rk3399-dwc3"))
+		simple->need_reset = true;
+
+	if (of_device_is_compatible(np, "amlogic,meson-axg-dwc3") ||
+	    of_device_is_compatible(np, "amlogic,meson-gxl-dwc3")) {
+		shared_resets = true;
+		simple->pulse_resets = true;
+	}
+
+	simple->resets = of_reset_control_array_get(np, shared_resets, true);
+	if (IS_ERR(simple->resets)) {
+		ret = PTR_ERR(simple->resets);
+		dev_err(dev, "failed to get device resets, err=%d\n", ret);
 		return ret;
+	}
+
+	if (simple->pulse_resets) {
+		ret = reset_control_reset(simple->resets);
+		if (ret)
+			goto err_resetc_put;
+	} else {
+		ret = reset_control_deassert(simple->resets);
+		if (ret)
+			goto err_resetc_put;
+	}
+
+	ret = dwc3_of_simple_clk_init(simple, of_count_phandle_with_args(np,
+						"clocks", "#clock-cells"));
+	if (ret)
+		goto err_resetc_assert;
 
 	ret = of_platform_populate(np, NULL, NULL, dev);
 	if (ret) {
@@ -298,16 +338,22 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 			clk_put(simple->clks[i]);
 		}
 
-		return ret;
+		goto err_resetc_assert;
 	}
-
-	platform_set_drvdata(pdev, simple);
 
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
 
 	return 0;
+
+err_resetc_assert:
+	if (!simple->pulse_resets)
+		reset_control_assert(simple->resets);
+
+err_resetc_put:
+	reset_control_put(simple->resets);
+	return ret;
 }
 
 static int dwc3_of_simple_remove(struct platform_device *pdev)
@@ -322,9 +368,16 @@ static int dwc3_of_simple_remove(struct platform_device *pdev)
 		clk_disable_unprepare(simple->clks[i]);
 		clk_put(simple->clks[i]);
 	}
+	simple->num_clocks = 0;
 
-	pm_runtime_put_sync(dev);
+	if (!simple->pulse_resets)
+		reset_control_assert(simple->resets);
+
+	reset_control_put(simple->resets);
+
 	pm_runtime_disable(dev);
+	pm_runtime_put_noidle(dev);
+	pm_runtime_set_suspended(dev);
 
 	return 0;
 }
@@ -350,6 +403,27 @@ static void dwc3_simple_vbus(struct dwc3 *dwc, bool vbus_off)
 	writel(reg, dwc->regs + addr);
 }
 
+void dwc3_usb2phycfg(struct dwc3 *dwc, bool suspend)
+{
+	u32 addr, reg;
+
+	addr = DWC3_OF_ADDRESS(DWC3_GUSB2PHYCFG(0));
+
+	if (suspend) {
+		reg = readl(dwc->regs + addr);
+		if (!(reg & DWC3_GUSB2PHYCFG_SUSPHY)) {
+			reg |= DWC3_GUSB2PHYCFG_SUSPHY;
+			writel(reg, (dwc->regs + addr));
+		}
+	} else {
+		reg = readl(dwc->regs + addr);
+		if ((reg & DWC3_GUSB2PHYCFG_SUSPHY)) {
+			reg &= ~DWC3_GUSB2PHYCFG_SUSPHY;
+			writel(reg, (dwc->regs + addr));
+		}
+	}
+}
+
 int dwc3_set_usb_core_power(struct dwc3 *dwc, bool on)
 {
 	u32 reg, retries;
@@ -370,8 +444,14 @@ int dwc3_set_usb_core_power(struct dwc3 *dwc, bool on)
 	if ((simple->soc_rev < ZYNQMP_SILICON_V4) || !simple->enable_d3_suspend)
 		return 0;
 
+	if (!simple->phy)
+		return 0;
+
 	if (on) {
 		dev_dbg(dwc->dev, "trying to set power state to D0....\n");
+
+		/* Release USB core reset , which was assert during D3 entry */
+		xpsgtr_usb_crst_release(simple->phy);
 
 		/* change power state to D0 */
 		writel(XLNX_REQ_PWR_STATE_D0,
@@ -385,15 +465,28 @@ int dwc3_set_usb_core_power(struct dwc3 *dwc, bool on)
 			     XLNX_CUR_PWR_STATE_D0)
 				break;
 
-			usleep_range(DWC3_PWR_TIMEOUT, DWC3_PWR_TIMEOUT * 2);
+			udelay(DWC3_PWR_TIMEOUT);
 		} while (--retries);
 
 		if (!retries) {
 			dev_err(dwc->dev, "Failed to set power state to D0\n");
 			return -EIO;
 		}
+
+		dwc->is_d3 = false;
+
+		/* Clear Suspend PHY bit if dis_u2_susphy_quirk is set */
+		if (dwc->dis_u2_susphy_quirk)
+			dwc3_usb2phycfg(dwc, false);
 	} else {
 		dev_dbg(dwc->dev, "Trying to set power state to D3...\n");
+
+		/*
+		 * Set Suspend PHY bit before entering D3 if
+		 * dis_u2_susphy_quirk is set
+		 */
+		if (dwc->dis_u2_susphy_quirk)
+			dwc3_usb2phycfg(dwc, true);
 
 		/* enable PME to wakeup from hibernation */
 		writel(XLNX_PME_ENABLE_SIG_GEN, reg_base + XLNX_USB_PME_ENABLE);
@@ -410,41 +503,33 @@ int dwc3_set_usb_core_power(struct dwc3 *dwc, bool on)
 					XLNX_CUR_PWR_STATE_D3)
 				break;
 
-			usleep_range(DWC3_PWR_TIMEOUT, DWC3_PWR_TIMEOUT * 2);
+			udelay(DWC3_PWR_TIMEOUT);
 		} while (--retries);
 
-		if (!retries)
+		if (!retries) {
 			dev_err(dwc->dev, "Failed to set power state to D3\n");
+			return -EIO;
+		}
+
+		/* Assert USB core reset after entering D3 state */
+		xpsgtr_usb_crst_assert(simple->phy);
+
+		dwc->is_d3 = true;
 	}
 
 	return 0;
 }
 EXPORT_SYMBOL(dwc3_set_usb_core_power);
 
-static int dwc3_of_simple_suspend(struct device *dev)
-{
-	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
-	int			i;
+#endif
 
-	if (!simple->wakeup_capable) {
-		/* Ask ULPI to turn OFF Vbus */
-		dwc3_simple_vbus(simple->dwc, true);
-
-		/* Disable the clocks */
-		for (i = 0; i < simple->num_clocks; i++)
-			clk_disable(simple->clks[i]);
-	}
-
-	return 0;
-}
-
-static int dwc3_of_simple_resume(struct device *dev)
+static int __maybe_unused dwc3_of_simple_resume(struct device *dev)
 {
 	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
 	int			ret;
 	int			i;
 
-	if (simple->wakeup_capable)
+	if (simple->wakeup_capable || simple->dwc->is_d3)
 		return 0;
 
 	for (i = 0; i < simple->num_clocks; i++) {
@@ -462,18 +547,7 @@ static int dwc3_of_simple_resume(struct device *dev)
 	return 0;
 }
 
-static int dwc3_of_simple_runtime_suspend(struct device *dev)
-{
-	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
-	int			i;
-
-	for (i = 0; i < simple->num_clocks; i++)
-		clk_disable(simple->clks[i]);
-
-	return 0;
-}
-
-static int dwc3_of_simple_runtime_resume(struct device *dev)
+static int __maybe_unused dwc3_of_simple_runtime_resume(struct device *dev)
 {
 	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
 	int			ret;
@@ -490,20 +564,55 @@ static int dwc3_of_simple_runtime_resume(struct device *dev)
 
 	return 0;
 }
-#endif
+
+static int __maybe_unused dwc3_of_simple_suspend(struct device *dev)
+{
+	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
+	int			i;
+
+	if (!simple->wakeup_capable && !simple->dwc->is_d3) {
+		/* Ask ULPI to turn OFF Vbus */
+		dwc3_simple_vbus(simple->dwc, true);
+
+		/* Disable the clocks */
+		for (i = 0; i < simple->num_clocks; i++)
+			clk_disable(simple->clks[i]);
+	}
+
+	if (simple->need_reset)
+		reset_control_assert(simple->resets);
+
+	return 0;
+}
+
+static int __maybe_unused dwc3_of_simple_runtime_suspend(struct device *dev)
+{
+	struct dwc3_of_simple	*simple = dev_get_drvdata(dev);
+	int			i;
+
+	for (i = 0; i < simple->num_clocks; i++)
+		clk_disable(simple->clks[i]);
+
+	if (simple->need_reset)
+		reset_control_deassert(simple->resets);
+
+	return 0;
+}
 
 static const struct dev_pm_ops dwc3_of_simple_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(dwc3_of_simple_suspend,
-				dwc3_of_simple_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(dwc3_of_simple_suspend, dwc3_of_simple_resume)
 	SET_RUNTIME_PM_OPS(dwc3_of_simple_runtime_suspend,
 			dwc3_of_simple_runtime_resume, NULL)
 };
 
 static const struct of_device_id of_dwc3_simple_match[] = {
-	{ .compatible = "qcom,dwc3" },
 	{ .compatible = "rockchip,rk3399-dwc3" },
 	{ .compatible = "xlnx,zynqmp-dwc3" },
 	{ .compatible = "cavium,octeon-7130-usb-uctl" },
+	{ .compatible = "sprd,sc9860-dwc3" },
+	{ .compatible = "amlogic,meson-axg-dwc3" },
+	{ .compatible = "amlogic,meson-gxl-dwc3" },
+	{ .compatible = "allwinner,sun50i-h6-dwc3" },
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, of_dwc3_simple_match);
@@ -514,7 +623,7 @@ static struct platform_driver dwc3_of_simple_driver = {
 	.driver		= {
 		.name	= "dwc3-of-simple",
 		.of_match_table = of_dwc3_simple_match,
-		.pm = &dwc3_of_simple_dev_pm_ops,
+		.pm	= &dwc3_of_simple_dev_pm_ops,
 	},
 };
 

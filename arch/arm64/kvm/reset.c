@@ -42,20 +42,15 @@ static const struct kvm_regs default_regs_reset = {
 };
 
 static const struct kvm_regs default_regs_reset32 = {
-	.regs.pstate = (COMPAT_PSR_MODE_SVC | COMPAT_PSR_A_BIT |
-			COMPAT_PSR_I_BIT | COMPAT_PSR_F_BIT),
-};
-
-static const struct kvm_irq_level default_vtimer_irq = {
-	.irq	= 27,
-	.level	= 1,
+	.regs.pstate = (PSR_AA32_MODE_SVC | PSR_AA32_A_BIT |
+			PSR_AA32_I_BIT | PSR_AA32_F_BIT),
 };
 
 static bool cpu_has_32bit_el1(void)
 {
 	u64 pfr0;
 
-	pfr0 = read_system_reg(SYS_ID_AA64PFR0_EL1);
+	pfr0 = read_sanitised_ftr_reg(SYS_ID_AA64PFR0_EL1);
 	return !!(pfr0 & 0x20);
 }
 
@@ -82,15 +77,13 @@ int kvm_arch_dev_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ARM_PMU_V3:
 		r = kvm_arm_support_pmu_v3();
 		break;
+	case KVM_CAP_ARM_INJECT_SERROR_ESR:
+		r = cpus_have_const_cap(ARM64_HAS_RAS_EXTN);
+		break;
 	case KVM_CAP_SET_GUEST_DEBUG:
 	case KVM_CAP_VCPU_ATTRIBUTES:
+	case KVM_CAP_VCPU_EVENTS:
 		r = 1;
-		break;
-	case KVM_CAP_MSI_DEVID:
-		if (!kvm)
-			r = -EINVAL;
-		else
-			r = kvm->arch.vgic.msis_require_devid;
 		break;
 	default:
 		r = 0;
@@ -109,7 +102,6 @@ int kvm_arch_dev_ioctl_check_extension(struct kvm *kvm, long ext)
  */
 int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 {
-	const struct kvm_irq_level *cpu_vtimer_irq;
 	const struct kvm_regs *cpu_reset;
 
 	switch (vcpu->arch.target) {
@@ -122,7 +114,6 @@ int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 			cpu_reset = &default_regs_reset;
 		}
 
-		cpu_vtimer_irq = &default_vtimer_irq;
 		break;
 	}
 
@@ -135,6 +126,10 @@ int kvm_reset_vcpu(struct kvm_vcpu *vcpu)
 	/* Reset PMU */
 	kvm_pmu_vcpu_reset(vcpu);
 
+	/* Default workaround setup is enabled (if supported) */
+	if (kvm_arm_have_ssbd() == KVM_SSBD_KERNEL)
+		vcpu->arch.workaround_flags |= VCPU_WORKAROUND_2_FLAG;
+
 	/* Reset timer */
-	return kvm_timer_vcpu_reset(vcpu, cpu_vtimer_irq);
+	return kvm_timer_vcpu_reset(vcpu);
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * PCI Hot Plug Controller Driver for System z
  *
@@ -10,7 +11,6 @@
 #define KMSG_COMPONENT "zpci"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
@@ -20,10 +20,6 @@
 
 #define SLOT_NAME_SIZE	10
 static LIST_HEAD(s390_hotplug_slot_list);
-
-MODULE_AUTHOR("Jan Glauber <jang@linux.vnet.ibm.com");
-MODULE_DESCRIPTION("Hot Plug PCI Controller for System z");
-MODULE_LICENSE("GPL");
 
 static int zpci_fn_configured(enum zpci_state state)
 {
@@ -134,15 +130,6 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	return 0;
 }
 
-static void release_slot(struct hotplug_slot *hotplug_slot)
-{
-	struct slot *slot = hotplug_slot->private;
-
-	kfree(slot->hotplug_slot->info);
-	kfree(slot->hotplug_slot);
-	kfree(slot);
-}
-
 static struct hotplug_slot_ops s390_hotplug_slot_ops = {
 	.enable_slot =		enable_slot,
 	.disable_slot =		disable_slot,
@@ -179,7 +166,6 @@ int zpci_init_slot(struct zpci_dev *zdev)
 	hotplug_slot->info = info;
 
 	hotplug_slot->ops = &s390_hotplug_slot_ops;
-	hotplug_slot->release = &release_slot;
 
 	get_power_status(hotplug_slot, &info->power_status);
 	get_adapter_status(hotplug_slot, &info->adapter_status);
@@ -213,5 +199,8 @@ void zpci_exit_slot(struct zpci_dev *zdev)
 			continue;
 		list_del(&slot->slot_list);
 		pci_hp_deregister(slot->hotplug_slot);
+		kfree(slot->hotplug_slot->info);
+		kfree(slot->hotplug_slot);
+		kfree(slot);
 	}
 }

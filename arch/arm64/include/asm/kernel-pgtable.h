@@ -19,6 +19,7 @@
 #ifndef __ASM_KERNEL_PGTABLE_H
 #define __ASM_KERNEL_PGTABLE_H
 
+#include <asm/pgtable.h>
 #include <asm/sparsemem.h>
 
 /*
@@ -51,8 +52,59 @@
 #define IDMAP_PGTABLE_LEVELS	(ARM64_HW_PGTABLE_LEVELS(PHYS_MASK_SHIFT))
 #endif
 
-#define SWAPPER_DIR_SIZE	(SWAPPER_PGTABLE_LEVELS * PAGE_SIZE)
+
+/*
+ * If KASLR is enabled, then an offset K is added to the kernel address
+ * space. The bottom 21 bits of this offset are zero to guarantee 2MB
+ * alignment for PA and VA.
+ *
+ * For each pagetable level of the swapper, we know that the shift will
+ * be larger than 21 (for the 4KB granule case we use section maps thus
+ * the smallest shift is actually 30) thus there is the possibility that
+ * KASLR can increase the number of pagetable entries by 1, so we make
+ * room for this extra entry.
+ *
+ * Note KASLR cannot increase the number of required entries for a level
+ * by more than one because it increments both the virtual start and end
+ * addresses equally (the extra entry comes from the case where the end
+ * address is just pushed over a boundary and the start address isn't).
+ */
+
+#ifdef CONFIG_RANDOMIZE_BASE
+#define EARLY_KASLR	(1)
+#else
+#define EARLY_KASLR	(0)
+#endif
+
+#define EARLY_ENTRIES(vstart, vend, shift) (((vend) >> (shift)) \
+					- ((vstart) >> (shift)) + 1 + EARLY_KASLR)
+
+#define EARLY_PGDS(vstart, vend) (EARLY_ENTRIES(vstart, vend, PGDIR_SHIFT))
+
+#if SWAPPER_PGTABLE_LEVELS > 3
+#define EARLY_PUDS(vstart, vend) (EARLY_ENTRIES(vstart, vend, PUD_SHIFT))
+#else
+#define EARLY_PUDS(vstart, vend) (0)
+#endif
+
+#if SWAPPER_PGTABLE_LEVELS > 2
+#define EARLY_PMDS(vstart, vend) (EARLY_ENTRIES(vstart, vend, SWAPPER_TABLE_SHIFT))
+#else
+#define EARLY_PMDS(vstart, vend) (0)
+#endif
+
+#define EARLY_PAGES(vstart, vend) ( 1 			/* PGDIR page */				\
+			+ EARLY_PGDS((vstart), (vend)) 	/* each PGDIR needs a next level page table */	\
+			+ EARLY_PUDS((vstart), (vend))	/* each PUD needs a next level page table */	\
+			+ EARLY_PMDS((vstart), (vend)))	/* each PMD needs a next level page table */
+#define SWAPPER_DIR_SIZE (PAGE_SIZE * EARLY_PAGES(KIMAGE_VADDR + TEXT_OFFSET, _end))
 #define IDMAP_DIR_SIZE		(IDMAP_PGTABLE_LEVELS * PAGE_SIZE)
+
+#ifdef CONFIG_ARM64_SW_TTBR0_PAN
+#define RESERVED_TTBR0_SIZE	(PAGE_SIZE)
+#else
+#define RESERVED_TTBR0_SIZE	(0)
+#endif
 
 /* Initial memory map size */
 #if ARM64_SWAPPER_USES_SECTION_MAPS

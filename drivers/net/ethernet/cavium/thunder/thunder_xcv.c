@@ -20,7 +20,7 @@
 #include "nic.h"
 #include "thunder_bgx.h"
 
-#define DRV_NAME	"thunder-xcv"
+#define DRV_NAME	"thunder_xcv"
 #define DRV_VERSION	"1.0"
 
 /* Register offsets */
@@ -116,8 +116,7 @@ void xcv_setup_link(bool link_up, int link_speed)
 	int speed = 2;
 
 	if (!xcv) {
-		dev_err(&xcv->pdev->dev,
-			"XCV init not done, probe may have failed\n");
+		pr_err("XCV init not done, probe may have failed\n");
 		return;
 	}
 

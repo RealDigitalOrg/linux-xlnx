@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/kernel/time/tick-broadcast-hrtimer.c
  * This file emulates a local clock event device
@@ -89,7 +90,7 @@ static struct clock_event_device ce_broadcast_hrtimer = {
 	.max_delta_ticks	= ULONG_MAX,
 	.mult			= 1,
 	.shift			= 0,
-	.cpumask		= cpu_all_mask,
+	.cpumask		= cpu_possible_mask,
 };
 
 static enum hrtimer_restart bc_handler(struct hrtimer *t)
@@ -97,7 +98,7 @@ static enum hrtimer_restart bc_handler(struct hrtimer *t)
 	ce_broadcast_hrtimer.event_handler(&ce_broadcast_hrtimer);
 
 	if (clockevent_state_oneshot(&ce_broadcast_hrtimer))
-		if (ce_broadcast_hrtimer.next_event.tv64 != KTIME_MAX)
+		if (ce_broadcast_hrtimer.next_event != KTIME_MAX)
 			return HRTIMER_RESTART;
 
 	return HRTIMER_NORESTART;

@@ -18,6 +18,7 @@
 #include <dt-bindings/media/xilinx-vip.h>
 #include <linux/bitops.h>
 #include <linux/compiler.h>
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/interrupt.h>
@@ -39,7 +40,7 @@
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
-#include <media/v4l2-of.h>
+#include <media/v4l2-fwnode.h>
 #include <media/v4l2-subdev.h>
 #include "xilinx-vip.h"
 
@@ -170,8 +171,6 @@
 #define XSDIRX_STAT_SB_RX_TDATA_GT_RESETDONE_MASK	BIT(2)
 #define XSDIRX_STAT_SB_RX_TDATA_GT_BITRATE_MASK		BIT(3)
 
-#define XSDIRX_VID_LOCK_WINDOW_VAL_MASK			GENMASK(15, 0)
-
 /* Number of media pads */
 #define XSDIRX_MEDIA_PADS	(1)
 
@@ -244,13 +243,18 @@
 #define XST352_BYTE3_ACT_LUMA_COUNT_MASK	BIT(22)
 #define XST352_BYTE3_ACT_LUMA_COUNT_OFFSET	22
 
+#define XST352_BYTE3_COLOR_FORMAT_MASK		GENMASK(19, 16)
+#define XST352_BYTE3_COLOR_FORMAT_OFFSET	16
+#define XST352_BYTE3_COLOR_FORMAT_422		0x0
+#define XST352_BYTE3_COLOR_FORMAT_420		0x3
+
 /**
  * enum sdi_family_enc - SDI Transport Video Format Detected with Active Pixels
  * @XSDIRX_SMPTE_ST_274: SMPTE ST 274 detected with AP 1920x1080
  * @XSDIRX_SMPTE_ST_296: SMPTE ST 296 detected with AP 1280x720
  * @XSDIRX_SMPTE_ST_2048_2: SMPTE ST 2048-2 detected with AP 2048x1080
  * @XSDIRX_SMPTE_ST_295: SMPTE ST 295 detected with AP 1920x1080
- * @XSDIRX_NTSC: NTSC encoding detected with AP 720x480
+ * @XSDIRX_NTSC: NTSC encoding detected with AP 720x486
  * @XSDIRX_PAL: PAL encoding detected with AP 720x576
  * @XSDIRX_TS_UNKNOWN: Unknown SMPTE Transport family type
  */
@@ -271,6 +275,9 @@ enum sdi_family_enc {
  * @irq: requested irq number
  * @include_edh: EDH processor presence
  * @mode: 3G/6G/12G mode
+ * @axi_clk: Axi lite interface clock
+ * @sdirx_clk: SDI Rx GT clock
+ * @vidout_clk: Video clock
  */
 struct xsdirxss_core {
 	struct device *dev;
@@ -278,6 +285,9 @@ struct xsdirxss_core {
 	int irq;
 	bool include_edh;
 	int mode;
+	struct clk *axi_clk;
+	struct clk *sdirx_clk;
+	struct clk *vidout_clk;
 };
 
 /**
@@ -462,8 +472,7 @@ static void xsdirx_setvidlockwindow(struct xsdirxss_core *core, u32 val)
 	 * the mode and transport stream should be locked to get the
 	 * video lock interrupt.
 	 */
-	xsdirxss_write(core, XSDIRX_VID_LOCK_WINDOW_REG,
-		       val & XSDIRX_VID_LOCK_WINDOW_VAL_MASK);
+	xsdirxss_write(core, XSDIRX_VID_LOCK_WINDOW_REG, val);
 }
 
 static void xsdirx_disableintr(struct xsdirxss_core *core, u32 mask)
@@ -593,6 +602,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 	struct xsdirxss_core *core = &state->core;
 	u32 mode, payload = 0, val, family, valid, tscan;
 	u8 byte1 = 0, active_luma = 0, pic_type = 0, framerate = 0;
+	u8 sampling = XST352_BYTE3_COLOR_FORMAT_422;
 	struct v4l2_mbus_framefmt *format = &state->formats[0];
 
 	mode = xsdirxss_read(core, XSDIRX_MODE_DET_STAT_REG);
@@ -618,6 +628,8 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 				XST352_BYTE2_FPS_MASK;
 		tscan = (payload & XST352_BYTE2_TS_TYPE_MASK) >>
 				XST352_BYTE2_TS_TYPE_OFFSET;
+		sampling = (payload & XST352_BYTE3_COLOR_FORMAT_MASK) >>
+			   XST352_BYTE3_COLOR_FORMAT_OFFSET;
 	} else {
 		dev_dbg(core->dev, "No ST352 payload available : Mode = %d\n",
 			mode);
@@ -664,7 +676,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 						format->field = V4L2_FIELD_NONE;
 					else
 						format->field =
-							V4L2_FIELD_INTERLACED;
+							V4L2_FIELD_ALTERNATE;
 				} else {
 					format->width = 1920;
 					format->height = 1080;
@@ -672,7 +684,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 						format->field = V4L2_FIELD_NONE;
 					else
 						format->field =
-							V4L2_FIELD_INTERLACED;
+							V4L2_FIELD_ALTERNATE;
 				}
 				break;
 			case XSDIRX_TS_DET_STAT_RATE_50HZ:
@@ -715,12 +727,12 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 		}
 		break;
 	case XSDIRX_MODE_SD_MASK:
-		format->field = V4L2_FIELD_INTERLACED;
+		format->field = V4L2_FIELD_ALTERNATE;
 
 		switch (family) {
 		case XSDIRX_NTSC:
 			format->width = 720;
-			format->height = 480;
+			format->height = 486;
 			break;
 		case XSDIRX_PAL:
 			format->width = 720;
@@ -788,7 +800,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 		default:
 			dev_dbg(core->dev, "Unknown 12G Mode SMPTE standard\n");
 			return -EINVAL;
-		};
+		}
 		break;
 	default:
 		dev_err(core->dev, "Invalid Mode\n");
@@ -799,7 +811,22 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 		if (pic_type)
 			format->field = V4L2_FIELD_NONE;
 		else
-			format->field = V4L2_FIELD_INTERLACED;
+			format->field = V4L2_FIELD_ALTERNATE;
+	}
+
+	if (format->field == V4L2_FIELD_ALTERNATE)
+		format->height = format->height / 2;
+
+	switch (sampling) {
+	case XST352_BYTE3_COLOR_FORMAT_420:
+		format->code = MEDIA_BUS_FMT_VYYUYY8_1X24;
+		break;
+	case XST352_BYTE3_COLOR_FORMAT_422:
+		format->code = MEDIA_BUS_FMT_UYVY8_1X16;
+		break;
+	default:
+		dev_err(core->dev, "Unsupported color format : %d\n", sampling);
+		return -EINVAL;
 	}
 
 	xsdirxss_get_framerate(&state->frame_interval, framerate);
@@ -809,6 +836,7 @@ static int xsdirx_get_stream_properties(struct xsdirxss_state *state)
 	dev_dbg(core->dev, "frame rate numerator = %d denominator = %d\n",
 		state->frame_interval.numerator,
 		state->frame_interval.denominator);
+	dev_dbg(core->dev, "Stream code = 0x%x\n", format->code);
 	return 0;
 }
 
@@ -1415,7 +1443,7 @@ static struct v4l2_ctrl_config xsdirxss_ctrls[] = {
 		.name	= "SDI Rx : Video Lock Window",
 		.type	= V4L2_CTRL_TYPE_INTEGER,
 		.min	= 0,
-		.max	= 0xFFFF,
+		.max	= 0xFFFFFFFF,
 		.step	= 1,
 		.def	= XSDIRX_DEFAULT_VIDEO_LOCK_WINDOW,
 	}, {
@@ -1563,8 +1591,9 @@ static int xsdirxss_parse_of(struct xsdirxss_state *xsdirxss)
 		dev_dbg(core->dev, "vf_code = %d bpc = %d bpp = %d\n",
 			format->vf_code, format->width, format->bpp);
 
-		if (format->vf_code != XVIP_VF_YUV_422) {
-			dev_err(core->dev, "Incorrect UG934 video format set. Accepts only YUV422\n");
+		if (format->vf_code != XVIP_VF_YUV_422 &&
+		    format->vf_code != XVIP_VF_YUV_420) {
+			dev_err(core->dev, "Incorrect UG934 video format set.\n");
 			return -EINVAL;
 		}
 		xsdirxss->vip_format = format;
@@ -1614,14 +1643,55 @@ static int xsdirxss_probe(struct platform_device *pdev)
 	xsdirxss->core.dev = &pdev->dev;
 	core = &xsdirxss->core;
 
+	core->axi_clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
+	if (IS_ERR(core->axi_clk)) {
+		ret = PTR_ERR(core->axi_clk);
+		dev_err(&pdev->dev, "failed to get s_axi_clk (%d)\n", ret);
+		return ret;
+	}
+
+	core->sdirx_clk = devm_clk_get(&pdev->dev, "sdi_rx_clk");
+	if (IS_ERR(core->sdirx_clk)) {
+		ret = PTR_ERR(core->sdirx_clk);
+		dev_err(&pdev->dev, "failed to get sdi_rx_clk (%d)\n", ret);
+		return ret;
+	}
+
+	core->vidout_clk = devm_clk_get(&pdev->dev, "video_out_clk");
+	if (IS_ERR(core->vidout_clk)) {
+		ret = PTR_ERR(core->vidout_clk);
+		dev_err(&pdev->dev, "failed to get video_out_aclk (%d)\n", ret);
+		return ret;
+	}
+
+	ret = clk_prepare_enable(core->axi_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to enable axi_clk (%d)\n", ret);
+		return ret;
+	}
+
+	ret = clk_prepare_enable(core->sdirx_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to enable sdirx_clk (%d)\n", ret);
+		goto rx_clk_err;
+	}
+
+	ret = clk_prepare_enable(core->vidout_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to enable vidout_clk (%d)\n", ret);
+		goto vidout_clk_err;
+	}
+
 	ret = xsdirxss_parse_of(xsdirxss);
 	if (ret < 0)
-		return ret;
+		goto clk_err;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	xsdirxss->core.iomem = devm_ioremap_resource(xsdirxss->core.dev, res);
-	if (IS_ERR(xsdirxss->core.iomem))
-		return PTR_ERR(xsdirxss->core.iomem);
+	if (IS_ERR(xsdirxss->core.iomem)) {
+		ret = PTR_ERR(xsdirxss->core.iomem);
+		goto clk_err;
+	}
 
 	/* Reset the core */
 	xsdirx_streamflow_control(core, false);
@@ -1740,6 +1810,12 @@ error:
 	v4l2_ctrl_handler_free(&xsdirxss->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
 
+clk_err:
+	clk_disable_unprepare(core->vidout_clk);
+vidout_clk_err:
+	clk_disable_unprepare(core->sdirx_clk);
+rx_clk_err:
+	clk_disable_unprepare(core->axi_clk);
 	return ret;
 }
 
@@ -1751,7 +1827,9 @@ static int xsdirxss_remove(struct platform_device *pdev)
 	v4l2_async_unregister_subdev(subdev);
 	v4l2_ctrl_handler_free(&xsdirxss->ctrl_handler);
 	media_entity_cleanup(&subdev->entity);
-
+	clk_disable_unprepare(xsdirxss->core.vidout_clk);
+	clk_disable_unprepare(xsdirxss->core.sdirx_clk);
+	clk_disable_unprepare(xsdirxss->core.axi_clk);
 	return 0;
 }
 

@@ -25,6 +25,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <linux/clk.h>
 #include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -62,6 +63,8 @@
 
 /* Master logic enable */
 #define XTG_MCNTL_MSTEN_MASK		0x00100000
+/* Loop enable */
+#define XTG_MCNTL_LOOPEN_MASK		0x00080000
 /* Slave error interrupt enable */
 #define XTG_SCNTL_ERREN_MASK		0x00008000
 /* Master complete interrupt enable */
@@ -71,7 +74,7 @@
 /* Master complete done status */
 #define XTG_ERR_STS_MSTDONE_MASK	0x80000000
 /* Error mask for error status/enable registers */
-#define XTG_ERR_ALL_ERRS_MASK		0x001F0003
+#define XTG_ERR_ALL_ERRS_MASK		0x801F0003
 /* Core Revision shift */
 #define XTG_MCNTL_REV_SHIFT		24
 
@@ -289,6 +292,7 @@ struct xtg_pram {
  * @last_wr_valid_idx: Last Write Valid Command Index
  * @id: Device instance id
  * @xtg_mram_offset: MasterRam offset
+ * @clk: Input clock
  */
 struct xtg_dev_info {
 	void __iomem *regs;
@@ -298,6 +302,7 @@ struct xtg_dev_info {
 	s16 last_wr_valid_idx;
 	u32 id;
 	u32 xtg_mram_offset;
+	struct clk *clk;
 };
 
 /**
@@ -315,6 +320,7 @@ struct xtg_dev_info {
  * @XTG_GET_STREAM_ENABLE : get strean mode traffic genration state
  * @XTG_GET_STREAM_TRANSFERLEN: get streaming mode transfer length
  * @XTG_GET_STREAM_TRANSFERCNT: get streaming mode transfer count
+ * @XTG_GET_MASTER_LOOP_EN: get master loop enable status
  * @XTG_START_MASTER_LOGIC: start master logic
  * @XTG_SET_SLV_CTRL_REG: set slave control
  * @XTG_CLEAR_ERRORS: clear errors
@@ -331,6 +337,7 @@ struct xtg_dev_info {
  * @XTG_SET_STREAM_DISABLE: disable streaming mode traffic genration
  * @XTG_SET_STREAM_TRANSFERLEN: set streaming mode transfer length
  * @XTG_SET_STREAM_TRANSFERCNT: set streaming mode transfer count
+ * @XTG_MASTER_LOOP_EN: enable master loop
  */
 enum xtg_sysfs_ioctl_opcode {
 	XTG_GET_MASTER_CMP_STS,
@@ -345,6 +352,7 @@ enum xtg_sysfs_ioctl_opcode {
 	XTG_GET_STATIC_TRANSFERDONE,
 	XTG_GET_STREAM_ENABLE,
 	XTG_GET_STREAM_TRANSFERLEN,
+	XTG_GET_MASTER_LOOP_EN,
 	XTG_GET_STREAM_TRANSFERCNT,
 	XTG_START_MASTER_LOGIC,
 	XTG_SET_SLV_CTRL_REG,
@@ -361,7 +369,8 @@ enum xtg_sysfs_ioctl_opcode {
 	XTG_SET_STREAM_ENABLE,
 	XTG_SET_STREAM_DISABLE,
 	XTG_SET_STREAM_TRANSFERLEN,
-	XTG_SET_STREAM_TRANSFERCNT
+	XTG_SET_STREAM_TRANSFERCNT,
+	XTG_MASTER_LOOP_EN
 };
 
 /**
@@ -538,7 +547,7 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 	ssize_t status, rdval = 0;
 
 	if (opcode > XTG_GET_STREAM_TRANSFERCNT) {
-		status = kstrtoul(buf, 16, &wrval);
+		status = kstrtoul(buf, 0, &wrval);
 		if (status < 0)
 			return status;
 	}
@@ -547,6 +556,11 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 	case XTG_GET_MASTER_CMP_STS:
 		rdval = (readl(tg->regs + XTG_MCNTL_OFFSET) &
 				XTG_MCNTL_MSTEN_MASK) ? 1 : 0;
+		break;
+
+	case XTG_GET_MASTER_LOOP_EN:
+		rdval = (readl(tg->regs + XTG_MCNTL_OFFSET) &
+				XTG_MCNTL_LOOPEN_MASK) ? 1 : 0;
 		break;
 
 	case XTG_GET_SLV_CTRL_REG:
@@ -563,8 +577,8 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 		break;
 
 	case XTG_GET_LAST_VALID_INDEX:
-		rdval = (tg->last_wr_valid_idx << 16) |
-				tg->last_rd_valid_idx;
+		rdval = (((tg->last_wr_valid_idx << 16) & 0xffff0000) |
+				(tg->last_rd_valid_idx & 0xffff));
 		break;
 
 	case XTG_GET_DEVICE_ID:
@@ -610,14 +624,24 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 				tg->regs + XTG_MCNTL_OFFSET);
 		break;
 
+	case XTG_MASTER_LOOP_EN:
+		if (wrval)
+			writel(readl(tg->regs + XTG_MCNTL_OFFSET) |
+					XTG_MCNTL_LOOPEN_MASK,
+				tg->regs + XTG_MCNTL_OFFSET);
+		else
+			writel(readl(tg->regs + XTG_MCNTL_OFFSET) &
+					~XTG_MCNTL_LOOPEN_MASK,
+				tg->regs + XTG_MCNTL_OFFSET);
+		break;
+
 	case XTG_SET_SLV_CTRL_REG:
 		writel(wrval, tg->regs + XTG_SCNTL_OFFSET);
 		break;
 
 	case XTG_ENABLE_ERRORS:
 		wrval &= XTG_ERR_ALL_ERRS_MASK;
-		writel(readl(tg->regs + XTG_ERR_EN_OFFSET) | wrval,
-			tg->regs + XTG_ERR_EN_OFFSET);
+		writel(wrval, tg->regs + XTG_ERR_EN_OFFSET);
 		break;
 
 	case XTG_CLEAR_ERRORS:
@@ -689,27 +713,32 @@ static ssize_t xtg_sysfs_ioctl(struct device *dev, const char *buf,
 
 	case XTG_SET_STREAM_ENABLE:
 		if (wrval) {
-			wrval &= XTG_STREAM_CNTL_STEN_MASK;
-			writel(readl(tg->regs + XTG_STREAM_CNTL_OFFSET) | wrval,
-			tg->regs + XTG_STREAM_CNTL_OFFSET);
+			rdval = readl(tg->regs + XTG_STREAM_CNTL_OFFSET);
+			rdval |= XTG_STREAM_CNTL_STEN_MASK,
+			writel(rdval,
+			       tg->regs + XTG_STREAM_CNTL_OFFSET);
 		} else {
 			writel(readl(tg->regs + XTG_STREAM_CNTL_OFFSET) &
-			~XTG_STREAM_CNTL_STEN_MASK,
-			tg->regs + XTG_STREAM_CNTL_OFFSET);
+			       ~XTG_STREAM_CNTL_STEN_MASK,
+			       tg->regs + XTG_STREAM_CNTL_OFFSET);
 		}
 		break;
 
 	case XTG_SET_STREAM_TRANSFERLEN:
 		wrval &= XTG_STREAM_TL_TLEN_MASK;
-		writel(readl(tg->regs + XTG_STREAM_TL_OFFSET) | wrval,
-			tg->regs + XTG_STREAM_TL_OFFSET);
+		rdval = readl(tg->regs + XTG_STREAM_TL_OFFSET);
+		rdval &= ~XTG_STREAM_TL_TLEN_MASK;
+		writel(rdval | wrval,
+		       tg->regs + XTG_STREAM_TL_OFFSET);
 		break;
 
 	case XTG_SET_STREAM_TRANSFERCNT:
 		wrval = ((wrval << XTG_STREAM_TL_TCNT_SHIFT) &
 				XTG_STREAM_TL_TCNT_MASK);
-		writel(readl(tg->regs + XTG_STREAM_TL_OFFSET) | wrval,
-			tg->regs + XTG_STREAM_TL_OFFSET);
+		rdval = readl(tg->regs + XTG_STREAM_TL_OFFSET);
+		rdval = rdval & ~XTG_STREAM_TL_TCNT_MASK;
+		writel(rdval | wrval,
+		       tg->regs + XTG_STREAM_TL_OFFSET);
 		break;
 
 	default:
@@ -967,6 +996,24 @@ static ssize_t stream_transfercnt_store(struct device *dev,
 	return size;
 }
 static DEVICE_ATTR_RW(stream_transfercnt);
+
+static ssize_t loop_enable_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	ssize_t rdval = xtg_sysfs_ioctl(dev, buf, XTG_GET_MASTER_LOOP_EN);
+
+	return snprintf(buf, PAGE_SIZE, "%zd\n", rdval);
+}
+
+static ssize_t loop_enable_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t size)
+{
+	xtg_sysfs_ioctl(dev, buf, XTG_MASTER_LOOP_EN);
+
+	return size;
+}
+static DEVICE_ATTR_RW(loop_enable);
 
 static ssize_t xtg_pram_read(struct file *filp, struct kobject *kobj,
 			     struct bin_attribute *bin_attr,
@@ -1240,6 +1287,7 @@ static const struct attribute *xtg_attrs[] = {
 	&dev_attr_stream_transferlen.attr,
 	&dev_attr_stream_enable.attr,
 	&dev_attr_reset_static_transferdone.attr,
+	&dev_attr_loop_enable.attr,
 	NULL,
 };
 
@@ -1357,12 +1405,29 @@ static int xtg_probe(struct platform_device *pdev)
 		}
 	}
 
+	tg->clk = devm_clk_get(&pdev->dev, NULL);
+	if (IS_ERR(tg->clk)) {
+		if (PTR_ERR(tg->clk) != -ENOENT) {
+			if (PTR_ERR(tg->clk) != -EPROBE_DEFER)
+				dev_err(&pdev->dev, "input clock not found\n");
+			return PTR_ERR(tg->clk);
+		}
+		tg->clk = NULL;
+	}
+
+	err = clk_prepare_enable(tg->clk);
+	if (err) {
+		dev_err(&pdev->dev, "Unable to enable clock.\n");
+		return err;
+	}
+
 	/*
 	 * Create sysfs file entries for the device
 	 */
 	err = sysfs_create_group(&dev->kobj, &xtg_attributes);
 	if (err < 0) {
 		dev_err(tg->dev, "unable to create sysfs entries\n");
+		clk_disable_unprepare(tg->clk);
 		return err;
 	}
 
@@ -1402,7 +1467,7 @@ static int xtg_remove(struct platform_device *pdev)
 	tg = dev_get_drvdata(&pdev->dev);
 	dev = tg->dev;
 	sysfs_remove_group(&dev->kobj, &xtg_attributes);
-
+	clk_disable_unprepare(tg->clk);
 
 	return 0;
 }

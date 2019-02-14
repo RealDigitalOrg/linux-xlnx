@@ -1,10 +1,6 @@
-TEST_PROGS := copy_unaligned copy_first_unaligned paste_unaligned paste_last_unaligned
+TEST_GEN_PROGS := copy_first_unaligned alignment_handler
 
-all: $(TEST_PROGS)
-
-$(TEST_PROGS): ../harness.c ../utils.c copy_paste_unaligned_common.c
-
+top_srcdir = ../../../../..
 include ../../lib.mk
 
-clean:
-	rm -f $(TEST_PROGS)
+$(TEST_GEN_PROGS): ../harness.c ../utils.c

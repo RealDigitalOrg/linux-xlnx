@@ -58,7 +58,7 @@ static enum hrtimer_restart snd_hrtimer_callback(struct hrtimer *hrt)
 
 	/* calculate the drift */
 	delta = ktime_sub(hrt->base->get_time(), hrtimer_get_expires(hrt));
-	if (delta.tv64 > 0)
+	if (delta > 0)
 		ticks += ktime_divns(delta, ticks * resolution);
 
 	snd_timer_interrupt(stime->timer, ticks);
@@ -127,7 +127,7 @@ static int snd_hrtimer_stop(struct snd_timer *t)
 	return 0;
 }
 
-static struct snd_timer_hardware hrtimer_hw = {
+static const struct snd_timer_hardware hrtimer_hw __initconst = {
 	.flags =	SNDRV_TIMER_HW_AUTO | SNDRV_TIMER_HW_TASKLET,
 	.open =		snd_hrtimer_open,
 	.close =	snd_hrtimer_close,
@@ -159,6 +159,7 @@ static int __init snd_hrtimer_init(void)
 	timer->hw = hrtimer_hw;
 	timer->hw.resolution = resolution;
 	timer->hw.ticks = NANO_SEC / resolution;
+	timer->max_instances = 100; /* lower the limit */
 
 	err = snd_timer_global_register(timer);
 	if (err < 0) {

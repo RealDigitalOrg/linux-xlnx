@@ -23,6 +23,7 @@
 #define PTP_RX_FRAME_SIZE   252
 #define PTP_HW_TSTAMP_OFFSET (PTP_RX_HWBUF_SIZE - PTP_HW_TSTAMP_SIZE)
 
+#define PTP_MSG_TYPE_MASK				BIT(3)
 #define PTP_TYPE_SYNC                                   0x0
 #define PTP_TYPE_FOLLOW_UP                              0x8
 #define PTP_TYPE_PDELAYREQ                              0x2
@@ -41,6 +42,10 @@
 #define PTP_RX_PACKET_CLEAR		0x00000001
 
 #define PTP_TX_BUFFER_OFFSET(index)	   (0x00011000 + (index) * 0x100)
+
+#define PTP_TX_CMD_FIELD_LEN			8
+#define PTP_TX_CMD_1STEP_SHIFT			BIT(16)
+#define PTP_TX_BUFFER_CMD2_FIELD		0x4
 
 #define PTP_TX_SYNC_OFFSET                 0x00011000
 #define PTP_TX_FOLLOW_UP_OFFSET            0x00011100
@@ -71,6 +76,10 @@
 #define PTP_TX_WAIT_ALL_FRAMES_MASK                     0x0000FF00
 #define PTP_TX_PACKET_FIELD_MASK                        0x00070000
 #define PTP_TX_PACKET_FIELD_SHIFT                       16
+/* 1-step Correction Field offset 802.1 ASrev */
+#define PTP_CRCT_FIELD_OFFSET				22
+/* 1-step Time Of Day offset 1588-2008 */
+#define PTP_TOD_FIELD_OFFSET				48
 
 int axienet_ptp_xmit(struct sk_buff *skb, struct net_device *ndev);
 irqreturn_t axienet_ptp_rx_irq(int irq, void *_ndev);

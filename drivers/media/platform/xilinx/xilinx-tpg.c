@@ -101,6 +101,16 @@
 #define XTPG_MIN_VBLANK			3
 #define XTPG_MAX_VBLANK			(XVTC_MAX_VSIZE - XVIP_MIN_HEIGHT)
 
+#define XTPG_MIN_WIDTH			(64)
+#define XTPG_MIN_HEIGHT			(64)
+#define XTPG_MAX_WIDTH			(10328)
+#define XTPG_MAX_HEIGHT			(7760)
+
+#define XTPG_MIN_PPC			1
+#define XTPG_MAX_PPC			8
+
+#define XTPG_MIN_FRM_INT		1
+
 /**
  * struct xtpg_device - Xilinx Test Pattern Generator device structure
  * @xvip: Xilinx Video IP device
@@ -120,6 +130,11 @@
  * @vtc: video timing controller
  * @vtmux_gpio: video timing mux GPIO
  * @rst_gpio: reset IP core GPIO
+ * @max_width: Maximum width supported by this instance
+ * @max_height: Maximum height supported by this instance
+ * @fi_d: frame interval denominator
+ * @fi_n: frame interval numerator
+ * @ppc: Pixels per clock control
  */
 struct xtpg_device {
 	struct xvip_device xvip;
@@ -143,6 +158,12 @@ struct xtpg_device {
 	struct xvtc_device *vtc;
 	struct gpio_desc *vtmux_gpio;
 	struct gpio_desc *rst_gpio;
+
+	u32 max_width;
+	u32 max_height;
+	u32 fi_d;
+	u32 fi_n;
+	u32 ppc;
 };
 
 static inline struct xtpg_device *to_tpg(struct v4l2_subdev *subdev)
@@ -170,16 +191,17 @@ static void xtpg_config_vtc(struct xtpg_device *xtpg, int width, int height)
 {
 
 	struct xvtc_config config = {
-		.hblank_start = width,
-		.hsync_start = width + 1,
+		.hblank_start = width / xtpg->ppc,
+		.hsync_start = width / xtpg->ppc + 1,
 		.vblank_start = height,
 		.vsync_start = height + 1,
+		.fps = xtpg->fi_d / xtpg->fi_n,
 	};
 	unsigned int htotal;
 	unsigned int vtotal;
 
 	htotal = min_t(unsigned int, XVTC_MAX_HSIZE,
-		       v4l2_ctrl_g_ctrl(xtpg->hblank) + width);
+		       (v4l2_ctrl_g_ctrl(xtpg->hblank) + width) / xtpg->ppc);
 	vtotal = min_t(unsigned int, XVTC_MAX_VSIZE,
 		       v4l2_ctrl_g_ctrl(xtpg->vblank) + height);
 
@@ -227,6 +249,33 @@ static void xtpg_update_pattern_control(struct xtpg_device *xtpg,
  * V4L2 Subdevice Video Operations
  */
 
+static int xtpg_g_frame_interval(struct v4l2_subdev *subdev,
+				 struct v4l2_subdev_frame_interval *fi)
+{
+	struct xtpg_device *xtpg = to_tpg(subdev);
+
+	fi->interval.numerator = xtpg->fi_n;
+	fi->interval.denominator = xtpg->fi_d;
+
+	return 0;
+}
+
+static int xtpg_s_frame_interval(struct v4l2_subdev *subdev,
+				 struct v4l2_subdev_frame_interval *fi)
+{
+	struct xtpg_device *xtpg = to_tpg(subdev);
+
+	if (!fi->interval.numerator || !fi->interval.denominator) {
+		xtpg->fi_n = XTPG_MIN_FRM_INT;
+		xtpg->fi_d = XTPG_MIN_FRM_INT;
+	} else {
+		xtpg->fi_n = fi->interval.numerator;
+		xtpg->fi_d = fi->interval.denominator;
+	}
+
+	return 0;
+}
+
 static int xtpg_s_stream(struct v4l2_subdev *subdev, int enable)
 {
 	struct xtpg_device *xtpg = to_tpg(subdev);
@@ -262,6 +311,9 @@ static int xtpg_s_stream(struct v4l2_subdev *subdev, int enable)
 		u32 fmt = 0;
 
 		switch (xtpg->vip_format->code) {
+		case MEDIA_BUS_FMT_VYYUYY8_1X24:
+			fmt = XTPG_HLS_COLOR_FORMAT_YUV_420;
+			break;
 		case MEDIA_BUS_FMT_UYVY8_1X16:
 			fmt = XTPG_HLS_COLOR_FORMAT_YUV_422;
 			break;
@@ -386,7 +438,10 @@ static int xtpg_set_format(struct v4l2_subdev *subdev,
 			__format->code = fmt->format.code;
 	}
 
-	xvip_set_format_size(__format, fmt);
+	__format->width = clamp_t(unsigned int, fmt->format.width,
+				  XTPG_MIN_WIDTH, xtpg->max_width);
+	__format->height = clamp_t(unsigned int, fmt->format.height,
+				   XTPG_MIN_HEIGHT, xtpg->max_height);
 
 	fmt->format = *__format;
 
@@ -596,21 +651,23 @@ static const struct v4l2_ctrl_ops xtpg_ctrl_ops = {
 	.s_ctrl	= xtpg_s_ctrl,
 };
 
-static struct v4l2_subdev_core_ops xtpg_core_ops = {
+static const struct v4l2_subdev_core_ops xtpg_core_ops = {
 };
 
-static struct v4l2_subdev_video_ops xtpg_video_ops = {
+static const struct v4l2_subdev_video_ops xtpg_video_ops = {
+	.g_frame_interval = xtpg_g_frame_interval,
+	.s_frame_interval = xtpg_s_frame_interval,
 	.s_stream = xtpg_s_stream,
 };
 
-static struct v4l2_subdev_pad_ops xtpg_pad_ops = {
+static const struct v4l2_subdev_pad_ops xtpg_pad_ops = {
 	.enum_mbus_code		= xvip_enum_mbus_code,
 	.enum_frame_size	= xtpg_enum_frame_size,
 	.get_fmt		= xtpg_get_format,
 	.set_fmt		= xtpg_set_format,
 };
 
-static struct v4l2_subdev_ops xtpg_ops = {
+static const struct v4l2_subdev_ops xtpg_ops = {
 	.core   = &xtpg_core_ops,
 	.video  = &xtpg_video_ops,
 	.pad    = &xtpg_pad_ops,
@@ -892,9 +949,42 @@ static int xtpg_parse_of(struct xtpg_device *xtpg)
 	struct device_node *port;
 	unsigned int nports = 0;
 	bool has_endpoint = false;
+	int ret;
 
 	if (of_device_is_compatible(dev->of_node, "xlnx,v-tpg-7.0"))
 		xtpg->is_hls = true;
+
+	ret = of_property_read_u32(node, "xlnx,max-height",
+				   &xtpg->max_height);
+	if (ret < 0) {
+		xtpg->max_height = XTPG_MAX_HEIGHT;
+	} else if (xtpg->max_height > XTPG_MAX_HEIGHT ||
+		   xtpg->max_height < XTPG_MIN_HEIGHT) {
+		dev_err(dev, "Invalid height in dt");
+		return -EINVAL;
+	}
+
+	ret = of_property_read_u32(node, "xlnx,max-width",
+				   &xtpg->max_width);
+	if (ret < 0) {
+		xtpg->max_width = XTPG_MAX_WIDTH;
+	} else if (xtpg->max_width > XTPG_MAX_WIDTH ||
+		   xtpg->max_width < XTPG_MIN_WIDTH) {
+		dev_err(dev, "Invalid width in dt");
+		return -EINVAL;
+	}
+
+	ret = of_property_read_u32(node, "xlnx,ppc",
+				   &xtpg->ppc);
+	if (ret < 0) {
+		xtpg->ppc = XTPG_MIN_PPC;
+		dev_dbg(dev, "failed to read ppc in dt\n");
+	} else if ((xtpg->ppc > XTPG_MAX_PPC)
+		|| (xtpg->ppc < XTPG_MIN_PPC)
+		|| (xtpg->ppc % 2)) {
+		dev_err(dev, "Invalid ppc config in dt\n");
+		return -EINVAL;
+	}
 
 	ports = of_get_child_by_name(node, "ports");
 	if (ports == NULL)
@@ -1111,6 +1201,10 @@ static int xtpg_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, xtpg);
 
 	xvip_print_version(&xtpg->xvip);
+
+	/* Initialize default frame interval */
+	xtpg->fi_n = 1;
+	xtpg->fi_d = 30;
 
 	ret = v4l2_async_register_subdev(subdev);
 	if (ret < 0) {
