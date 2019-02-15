@@ -1368,10 +1368,12 @@ static int axienet_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 
 #ifdef CONFIG_XILINX_TSN
 	if (lp->is_tsn) {
-		map = tsn_queue_mapping(skb);
 #ifdef CONFIG_XILINX_TSN_PTP
 		const struct ethhdr *eth;
+#endif
+		map = tsn_queue_mapping(skb);
 
+#ifdef CONFIG_XILINX_TSN_PTP
 		eth = (struct ethhdr *)skb->data;
 		/* check if skb is a PTP frame ? */
 		if (eth->h_proto == htons(ETH_P_1588))
@@ -2419,12 +2421,12 @@ static void axienet_poll_controller(struct net_device *ndev)
 {
 	struct axienet_local *lp = netdev_priv(ndev);
 
-	disable_irq(lp->tx_irq);
-	disable_irq(lp->rx_irq);
-	axienet_rx_irq(lp->tx_irq, ndev);
-	axienet_tx_irq(lp->rx_irq, ndev);
-	enable_irq(lp->tx_irq);
-	enable_irq(lp->rx_irq);
+	disable_irq(lp->ptp_tx_irq);
+	disable_irq(lp->ptp_rx_irq);
+	axienet_rx_irq(lp->ptp_tx_irq, ndev);
+	axienet_tx_irq(lp->ptp_rx_irq, ndev);
+	enable_irq(lp->ptp_tx_irq);
+	enable_irq(lp->ptp_rx_irq);
 }
 #endif
 
