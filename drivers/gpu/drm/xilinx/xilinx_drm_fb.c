@@ -196,12 +196,24 @@ xilinx_drm_fb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
+static int xilinx_drm_fb_helper_check_var(struct fb_var_screeninfo *var,
+					  struct fb_info *info)
+{
+	int ret;
+
+	// Turn off pixclock so that drm_fb_helper_check_var will not fail.
+	var->pixclock = 0;
+	ret = drm_fb_helper_check_var(var, info);
+	return ret;
+}
+
 static struct fb_ops xilinx_drm_fbdev_ops = {
 	.owner		= THIS_MODULE,
 	.fb_fillrect	= sys_fillrect,
 	.fb_copyarea	= sys_copyarea,
 	.fb_imageblit	= sys_imageblit,
-	.fb_check_var	= drm_fb_helper_check_var,
+	//.fb_check_var	= drm_fb_helper_check_var,
+	.fb_check_var	= xilinx_drm_fb_helper_check_var,
 	.fb_set_par	= drm_fb_helper_set_par,
 	.fb_blank	= drm_fb_helper_blank,
 	.fb_pan_display	= xilinx_drm_fb_helper_pan_display,
