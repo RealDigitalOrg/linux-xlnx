@@ -60,4 +60,5 @@ js-rtc-y = rtc.o
 
 obj-$(CONFIG_TILE_SROM)		+= tile-srom.o
 obj-$(CONFIG_XILLYBUS)		+= xillybus/
+obj-$(CONFIG_RD_7SEG_DISPLAY)	+= realdigital/
 obj-$(CONFIG_POWERNV_OP_PANEL)	+= powernv-op-panel.o

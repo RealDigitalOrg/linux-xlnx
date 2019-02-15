@@ -1,0 +1,13 @@
+#
+# Real Digital devices
+#
+
+config RD_7SEG_DISPLAY
+	tristate "Real Digital 7-Secgment display driver"
+	depends on OF
+	help
+	  The Real Digital 7-Segment display driver is provided to
+	  support the 7-Segment display on Blackboard and other
+	  boards that have a 7-Segment display.
+
+	  If unsure, say N.
