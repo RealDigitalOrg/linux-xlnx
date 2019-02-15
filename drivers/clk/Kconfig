@@ -148,6 +148,13 @@ config CLK_QORIQ
 	  This adds the clock driver support for Freescale QorIQ platforms
 	  using common clock framework.
 
+config COMMON_CLK_HDMI_XLNX
+	tristate "Real Digital HDMI Clock Driver"
+	depends on COMMON_CLK && OF
+	---help---
+	  Support for the Real Digital HDMI Clock generator for
+	  Xilinx FPGAs.
+
 config COMMON_CLK_XGENE
 	bool "Clock driver for APM XGene SoC"
 	default y
