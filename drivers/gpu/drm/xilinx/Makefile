@@ -12,3 +12,4 @@ obj-$(CONFIG_DRM_XILINX_DP) += xilinx_drm_dp.o
 obj-$(CONFIG_DRM_XILINX_DP_SUB) += xilinx_drm_dp_sub.o
 obj-$(CONFIG_DRM_XILINX_MIPI_DSI) += xilinx_drm_dsi.o
 obj-$(CONFIG_DRM_XILINX_SDI) += xilinx_drm_sdi.o
+obj-$(CONFIG_DRM_REALDIGITAL_HDMI) += rd_drm_hdmi.o
