@@ -42,18 +42,26 @@ void Si5324_RatApprox(u64 f, u64 md, u32 *num, u32 *denom)
 
     /* Continued fraction and check denominator each step */
     for (i = 0; i < 64; i++) {
-        a = n ? d / n : 0;
+        // a = n ? d / n : 0;
+        a = n;
+        if (n != 0)
+            do_div (a, n);
         if (i && !a) {
             break;
         }
 
         x = d;
         d = n;
-        n = x % n;
+        // n = x % n;
+        n = x;
+        do_div (x, n);
+        n = d - x * n;
 
         x = a;
         if (k[1] * a + k[0] >= md) {
-            x = (md - k[0]) / k[1];
+            // x = (md - k[0]) / k[1];
+            x = md - k[0];
+            do_div (x, k[1]);
             if (x * 2 >= a || k[1] >= md) {
                 i = 65;
             } else {
@@ -92,7 +100,11 @@ int Si5324_FindN2ls(si5324_settings_t *settings) {
     u64 n2_ls_div_n3;
     u32 mult;
 
-    n2_ls_div_n3 = settings->fosc / (settings->fin >> 28) / settings->n2_hs / 2;
+    // n2_ls_div_n3 = settings->fosc / (settings->fin >> 28) / settings->n2_hs / 2;
+    n2_ls_div_n3 = settings->fosc;
+    do_div (n2_ls_div_n3, settings->fin >> 28);
+    do_div (n2_ls_div_n3, settings->n2_hs / 2);
+
     Si5324_RatApprox(n2_ls_div_n3, settings->n31_max, &(settings->n2_ls), &(settings->n31));
     settings->n2_ls *= 2;
     // Rational approximation returns the smalles ratio possible. Upscaling
@@ -121,9 +133,13 @@ int Si5324_FindN2ls(si5324_settings_t *settings) {
     }
     else {
         // N2_LS and N3 values within range: check actual output frequency
-        f3_actual = settings->fin / settings->n31;
+        // f3_actual = settings->fin / settings->n31;
+        f3_actual = settings->fin;
+        do_div (f3_actual, settings->n31);
         fosc_actual = f3_actual * settings->n2_hs * settings->n2_ls;
-        fout_actual = fosc_actual / (settings->n1_hs * settings->nc1_ls);
+        // fout_actual = fosc_actual / (settings->n1_hs * settings->nc1_ls);
+        fout_actual = fosc_actual;
+        do_div (fosc_actual, settings->n1_hs * settings->nc1_ls);
         delta_fout = fout_actual - settings->fout;
         // Check actual frequencies for validity
         if ((f3_actual < ((u64)SI5324_F3_MIN) << 28) || (f3_actual > ((u64)SI5324_F3_MAX) << 28)) {
@@ -143,7 +159,8 @@ int Si5324_FindN2ls(si5324_settings_t *settings) {
                 printk(KERN_INFO "Found solution: fout = %dHz delta = %dHz.\n",
                     (u32)(fout_actual >> 28), (u32)(delta_fout >> 28));
                 printk(KERN_INFO "                fosc = %dkHz f3 = %dHz.\n",
-                    (u32)((fosc_actual >> 28) / 1000), (u32)(f3_actual >> 28));
+                    //(u32)((fosc_actual >> 28) / 1000), (u32)(f3_actual >> 28));
+                    ((u32)(fosc_actual >> 28) / 1000), (u32)(f3_actual >> 28));
             }
             if (((u64)llabs(delta_fout)) < settings->best_delta_fout) {
                 // Found a better solution: remember this one!
@@ -181,16 +198,23 @@ int Si5324_FindN2ls(si5324_settings_t *settings) {
  */
 int Si5324_FindN2(si5324_settings_t *settings) {
     u32 result;
+    u64 temp;
 
     for (settings->n2_hs = SI5324_N2_HS_MAX; settings->n2_hs >= SI5324_N2_HS_MIN; settings->n2_hs--) {
         if (SI5324_DEBUG) {
             printk(KERN_INFO "Trying N2_HS = %d.\n", settings->n2_hs);
         }
-        settings->n2_ls_min = (u32)(settings->fosc / ((u64)(SI5324_F3_MAX * settings->n2_hs) << 28));
+        // settings->n2_ls_min = (u32)(settings->fosc / ((u64)(SI5324_F3_MAX * settings->n2_hs) << 28));
+        temp = settings->fosc;
+        do_div (temp, (u64)(SI5324_F3_MAX * settings->n2_hs) << 28);
+        settings->n2_ls_min = (u32)temp;
         if (settings->n2_ls_min < SI5324_N2_LS_MIN) {
             settings->n2_ls_min = SI5324_N2_LS_MIN;
         }
-        settings->n2_ls_max = (u32)(settings->fosc / ((u64)(SI5324_F3_MIN * settings->n2_hs) << 28));
+        // settings->n2_ls_max = (u32)(settings->fosc / ((u64)(SI5324_F3_MIN * settings->n2_hs) << 28));
+        temp = settings->fosc;
+        do_div (temp, (u64)(SI5324_F3_MIN * settings->n2_hs) << 28);
+        settings->n2_ls_max = (u32)temp;
         if (settings->n2_ls_max > SI5324_N2_LS_MAX) {
             settings->n2_ls_max = SI5324_N2_LS_MAX;
         }
@@ -302,6 +326,7 @@ int Si5324_CalcFreqSettings(u32 ClkInFreq, u32 ClkOutFreq, u32 *ClkActual,
     /* TBD */
     si5324_settings_t settings;
     int result;
+    u64 temp;
 
     settings.fin = (u64)ClkInFreq  << 28; // 32.28 fixed point
     settings.fout= (u64)ClkOutFreq << 28; // 32.28 fixed point
@@ -309,11 +334,17 @@ int Si5324_CalcFreqSettings(u32 ClkInFreq, u32 ClkOutFreq, u32 *ClkActual,
 
     // Calculate some limits for N1_HS * NCn_LS and for N3 base on the input
     // and output frequencies.
-    settings.n1_hs_min = (int)(SI5324_FOSC_MIN / ClkOutFreq);
+    //settings.n1_hs_min = (int)(SI5324_FOSC_MIN / ClkOutFreq);
+    temp = SI5324_FOSC_MIN;
+    do_div (temp, ClkOutFreq);
+    settings.n1_hs_min = (int)temp;
     if (settings.n1_hs_min < SI5324_N1_HS_MIN * SI5324_NC_LS_MIN) {
         settings.n1_hs_min = SI5324_N1_HS_MIN * SI5324_NC_LS_MIN;
     }
-    settings.n1_hs_max = (int)(SI5324_FOSC_MAX / ClkOutFreq);
+    //settings.n1_hs_max = (int)(SI5324_FOSC_MAX / ClkOutFreq);
+    temp = SI5324_FOSC_MAX;
+    do_div (temp, ClkOutFreq);
+    settings.n1_hs_max = (int)temp;
     if (settings.n1_hs_max > SI5324_N1_HS_MAX * SI5324_NC_LS_MAX) {
         settings.n1_hs_max = SI5324_N1_HS_MAX * SI5324_NC_LS_MAX;
     }
