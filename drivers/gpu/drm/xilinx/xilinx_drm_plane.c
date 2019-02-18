@@ -140,7 +140,7 @@ void xilinx_drm_plane_commit(struct drm_plane *base_plane)
 	for (i = 0; i < MAX_NUM_SUB_PLANES; i++) {
 		struct xilinx_drm_plane_dma *dma = &plane->dma[i];
 
-		if (dma->chan && dma->is_active) {
+		if (dma->chan) {
 			flags = DMA_CTRL_ACK | DMA_PREP_INTERRUPT;
 			desc = dmaengine_prep_interleaved_dma(dma->chan,
 							      &dma->xt,
@@ -153,6 +153,7 @@ void xilinx_drm_plane_commit(struct drm_plane *base_plane)
 			dmaengine_submit(desc);
 
 			dma_async_issue_pending(dma->chan);
+			dma->is_active = true;
 		}
 	}
 }

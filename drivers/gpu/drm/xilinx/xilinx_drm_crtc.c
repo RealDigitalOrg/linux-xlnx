@@ -88,7 +88,6 @@ static void xilinx_drm_crtc_dpms(struct drm_crtc *base_crtc, int dpms)
 	default:
 		if (crtc->vtc) {
 			xilinx_vtc_disable(crtc->vtc);
-			xilinx_vtc_reset(crtc->vtc);
 		}
 		if (crtc->cresample) {
 			xilinx_cresample_disable(crtc->cresample);
