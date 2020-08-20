@@ -95,7 +95,9 @@
 #define XILINX_FRMBUF_FMT_BGRA8			26
 #define XILINX_FRMBUF_FMT_BGRX8			27
 #define XILINX_FRMBUF_FMT_UYVY8			28
-#define XILINX_FRMBUF_FMT_BGR8				29
+#define XILINX_FRMBUF_FMT_BGR8			29
+#define XILINX_FRMBUF_FMT_RGBX12		30
+#define XILINX_FRMBUF_FMT_RGB16			35
 
 /* FID Register */
 #define XILINX_FRMBUF_FID_MASK			BIT(0)
@@ -145,7 +147,7 @@ struct xilinx_frmbuf_tx_descriptor {
 	struct xilinx_frmbuf_desc_hw hw;
 	struct list_head node;
 	u32 fid;
-	bool earlycb;
+	u32 earlycb;
 };
 
 /**
@@ -446,6 +448,24 @@ static const struct xilinx_frmbuf_format_desc xilinx_frmbuf_formats[] = {
 		.drm_fmt = DRM_FORMAT_AVUY,
 		.v4l2_fmt = 0,
 		.fmt_bitmask = BIT(21),
+	},
+	{
+		.dts_name = "xbgr4121212",
+		.id = XILINX_FRMBUF_FMT_RGBX12,
+		.bpw = 40,
+		.ppw = 1,
+		.num_planes = 1,
+		.v4l2_fmt = V4L2_PIX_FMT_XBGR40,
+		.fmt_bitmask = BIT(22),
+	},
+	{
+		.dts_name = "rgb16",
+		.id = XILINX_FRMBUF_FMT_RGB16,
+		.bpw = 48,
+		.ppw = 1,
+		.num_planes = 1,
+		.v4l2_fmt = V4L2_PIX_FMT_BGR48,
+		.fmt_bitmask = BIT(23),
 	},
 };
 
@@ -802,7 +822,7 @@ EXPORT_SYMBOL(xilinx_xdma_set_fid);
 
 int xilinx_xdma_get_earlycb(struct dma_chan *chan,
 			    struct dma_async_tx_descriptor *async_tx,
-			    bool *enable)
+			    u32 *earlycb)
 {
 	struct xilinx_frmbuf_device *xdev;
 	struct xilinx_frmbuf_tx_descriptor *desc;
@@ -811,21 +831,21 @@ int xilinx_xdma_get_earlycb(struct dma_chan *chan,
 	if (IS_ERR(xdev))
 		return PTR_ERR(xdev);
 
-	if (!async_tx || !enable)
+	if (!async_tx || !earlycb)
 		return -EINVAL;
 
 	desc = to_dma_tx_descriptor(async_tx);
 	if (!desc)
 		return -EINVAL;
 
-	*enable = desc->earlycb;
+	*earlycb = desc->earlycb;
 	return 0;
 }
 EXPORT_SYMBOL(xilinx_xdma_get_earlycb);
 
 int xilinx_xdma_set_earlycb(struct dma_chan *chan,
 			    struct dma_async_tx_descriptor *async_tx,
-			    bool enable)
+			    u32 earlycb)
 {
 	struct xilinx_frmbuf_device *xdev;
 	struct xilinx_frmbuf_tx_descriptor *desc;
@@ -841,7 +861,7 @@ int xilinx_xdma_set_earlycb(struct dma_chan *chan,
 	if (!desc)
 		return -EINVAL;
 
-	desc->earlycb = enable;
+	desc->earlycb = earlycb;
 	return 0;
 }
 EXPORT_SYMBOL(xilinx_xdma_set_earlycb);
@@ -1076,6 +1096,19 @@ static void xilinx_frmbuf_start_transfer(struct xilinx_frmbuf_chan *chan)
 				struct xilinx_frmbuf_tx_descriptor,
 				node);
 
+	if (desc->earlycb == EARLY_CALLBACK_START_DESC) {
+		dma_async_tx_callback callback;
+		void *callback_param;
+
+		callback = desc->async_tx.callback;
+		callback_param = desc->async_tx.callback_param;
+		if (callback) {
+			callback(callback_param);
+			desc->async_tx.callback = NULL;
+			chan->active_desc = desc;
+		}
+	}
+
 	/* Start the transfer */
 	chan->write_addr(chan, XILINX_FRMBUF_ADDR_OFFSET,
 			 desc->hw.luma_plane_addr);
@@ -1164,7 +1197,7 @@ static irqreturn_t xilinx_frmbuf_irq_handler(int irq, void *data)
 
 	/* Check if callback function needs to be called early */
 	desc = chan->staged_desc;
-	if (desc && desc->earlycb) {
+	if (desc && desc->earlycb == EARLY_CALLBACK) {
 		callback = desc->async_tx.callback;
 		callback_param = desc->async_tx.callback_param;
 		if (callback) {
@@ -1505,7 +1538,8 @@ static int xilinx_frmbuf_probe(struct platform_device *pdev)
 
 	err = of_property_read_u32(node, "xlnx,max-height", &xdev->max_height);
 	if (err < 0) {
-		xdev->max_height = XILINX_FRMBUF_MAX_HEIGHT;
+		dev_err(xdev->dev, "xlnx,max-height is missing!");
+		return -EINVAL;
 	} else if (xdev->max_height > XILINX_FRMBUF_MAX_HEIGHT ||
 		   xdev->max_height < XILINX_FRMBUF_MIN_HEIGHT) {
 		dev_err(&pdev->dev, "Invalid height in dt");
@@ -1514,7 +1548,8 @@ static int xilinx_frmbuf_probe(struct platform_device *pdev)
 
 	err = of_property_read_u32(node, "xlnx,max-width", &xdev->max_width);
 	if (err < 0) {
-		xdev->max_width = XILINX_FRMBUF_MAX_WIDTH;
+		dev_err(xdev->dev, "xlnx,max-width is missing!");
+		return -EINVAL;
 	} else if (xdev->max_width > XILINX_FRMBUF_MAX_WIDTH ||
 		   xdev->max_width < XILINX_FRMBUF_MIN_WIDTH) {
 		dev_err(&pdev->dev, "Invalid width in dt");
@@ -1524,7 +1559,7 @@ static int xilinx_frmbuf_probe(struct platform_device *pdev)
 	/* Initialize the DMA engine */
 	if (xdev->cfg->flags & XILINX_PPC_PROP) {
 		err = of_property_read_u32(node, "xlnx,pixels-per-clock", &ppc);
-		if (err || (ppc != 1 && ppc != 2 && ppc != 4)) {
+		if (err || (ppc != 1 && ppc != 2 && ppc != 4 && ppc != 8)) {
 			dev_err(&pdev->dev, "missing or invalid pixels per clock dts prop\n");
 			return err;
 		}
@@ -1648,6 +1683,8 @@ disable_clk:
 static int xilinx_frmbuf_remove(struct platform_device *pdev)
 {
 	struct xilinx_frmbuf_device *xdev = platform_get_drvdata(pdev);
+
+	of_dma_controller_free(pdev->dev.of_node);
 
 	dma_async_device_unregister(&xdev->common);
 	xilinx_frmbuf_chan_remove(&xdev->chan);

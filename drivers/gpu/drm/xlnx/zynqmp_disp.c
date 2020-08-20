@@ -19,6 +19,7 @@
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_cma_helper.h>
@@ -2508,7 +2509,6 @@ static int zynqmp_disp_plane_mode_set(struct drm_plane *plane,
 {
 	struct zynqmp_disp_layer *layer = plane_to_layer(plane);
 	const struct drm_format_info *info = fb->format;
-	struct drm_format_name_buf format_name;
 	struct device *dev = layer->disp->dev;
 	dma_addr_t paddr;
 	unsigned int i;
@@ -2677,6 +2677,17 @@ zynqmp_disp_plane_atomic_update(struct drm_plane *plane,
 	if (!plane->state->crtc || !plane->state->fb)
 		return;
 
+	if (plane->state->fb == old_state->fb &&
+	    plane->state->crtc_x == old_state->crtc_x &&
+	    plane->state->crtc_y == old_state->crtc_y &&
+	    plane->state->crtc_w == old_state->crtc_w &&
+	    plane->state->crtc_h == old_state->crtc_h &&
+	    plane->state->src_x == old_state->src_x &&
+	    plane->state->src_y == old_state->src_y &&
+	    plane->state->src_w == old_state->src_w &&
+	    plane->state->src_h == old_state->src_h)
+		return;
+
 	if (old_state->fb &&
 	    old_state->fb->format->format != plane->state->fb->format->format)
 		zynqmp_disp_plane_disable(plane);
@@ -2713,14 +2724,17 @@ static void
 zynqmp_disp_plane_atomic_async_update(struct drm_plane *plane,
 				      struct drm_plane_state *new_state)
 {
-	struct drm_plane_state *old_state =
-		drm_atomic_get_old_plane_state(new_state->state, plane);
+	int ret;
 
 	if (plane->state->fb == new_state->fb)
 		return;
 
+	if (plane->state->fb &&
+	    plane->state->fb->format->format != new_state->fb->format->format)
+		zynqmp_disp_plane_disable(plane);
+
 	 /* Update the current state with new configurations */
-	drm_atomic_set_fb_for_plane(plane->state, new_state->fb);
+	swap(plane->state->fb, new_state->fb);
 	plane->state->crtc = new_state->crtc;
 	plane->state->crtc_x = new_state->crtc_x;
 	plane->state->crtc_y = new_state->crtc_y;
@@ -2732,7 +2746,19 @@ zynqmp_disp_plane_atomic_async_update(struct drm_plane *plane,
 	plane->state->src_h = new_state->src_h;
 	plane->state->state = new_state->state;
 
-	zynqmp_disp_plane_atomic_update(plane, old_state);
+	ret = zynqmp_disp_plane_mode_set(plane, plane->state->fb,
+					 plane->state->crtc_x,
+					 plane->state->crtc_y,
+					 plane->state->crtc_w,
+					 plane->state->crtc_h,
+					 plane->state->src_x >> 16,
+					 plane->state->src_y >> 16,
+					 plane->state->src_w >> 16,
+					 plane->state->src_h >> 16);
+	if (ret)
+		return;
+
+	zynqmp_disp_plane_enable(plane);
 }
 
 static const struct drm_plane_helper_funcs zynqmp_disp_plane_helper_funcs = {
@@ -2941,7 +2967,7 @@ zynqmp_disp_crtc_atomic_begin(struct drm_crtc *crtc,
 	drm_crtc_vblank_on(crtc);
 	/* Don't rely on vblank when disabling crtc */
 	spin_lock_irq(&crtc->dev->event_lock);
-	if (crtc->primary->state->fb && crtc->state->event) {
+	if (crtc->state->event) {
 		/* Consume the flip_done event from atomic helper */
 		crtc->state->event->pipe = drm_crtc_index(crtc);
 		WARN_ON(drm_crtc_vblank_get(crtc) != 0);
@@ -3045,10 +3071,9 @@ static void zynqmp_disp_create_crtc(struct zynqmp_disp *disp)
 {
 	struct drm_plane *plane = &disp->layers[ZYNQMP_DISP_LAYER_GFX].plane;
 	struct drm_mode_object *obj = &disp->xlnx_crtc.crtc.base;
-	int ret;
 
-	ret = drm_crtc_init_with_planes(disp->drm, &disp->xlnx_crtc.crtc, plane,
-					NULL, &zynqmp_disp_crtc_funcs, NULL);
+	drm_crtc_init_with_planes(disp->drm, &disp->xlnx_crtc.crtc, plane,
+				  NULL, &zynqmp_disp_crtc_funcs, NULL);
 	drm_crtc_helper_add(&disp->xlnx_crtc.crtc,
 			    &zynqmp_disp_crtc_helper_funcs);
 	drm_object_attach_property(obj, disp->color_prop, 0);

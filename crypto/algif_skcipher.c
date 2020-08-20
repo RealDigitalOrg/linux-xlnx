@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * algif_skcipher: User-space interface for skcipher algorithms
  *
  * This file provides the user-space API for symmetric key ciphers.
  *
  * Copyright (c) 2010 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  *
  * The following concept of the memory management is used:
  *
@@ -323,12 +319,7 @@ static int skcipher_setkey(void *private, const u8 *key, unsigned int keylen)
 static int skcipher_setkeytype(void *private, const u8 *key,
 			       unsigned int keylen)
 {
-	struct skcipher_tfm *tfm = private;
-	int err;
-
-	err = crypto_skcipher_setkeytype(tfm->skcipher, key, keylen);
-
-	return err;
+	return crypto_skcipher_setkeytype(private, key, keylen);
 }
 
 static void skcipher_sock_destruct(struct sock *sk)

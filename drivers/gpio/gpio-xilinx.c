@@ -411,6 +411,9 @@ static void xgpio_irqhandler(struct irq_desc *desc)
 	int offset;
 	unsigned long val;
 
+	if (!chip)
+		return;
+
 	chained_irq_enter(irqchip, desc);
 
 	val = xgpio_readreg(mm_gc->regs + chip->offset);
@@ -445,14 +448,14 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 
 	int ret = of_irq_to_resource(np, 0, &res);
 
-	if (!ret) {
+	if (ret <= 0) {
 		pr_info("GPIO IRQ not connected\n");
 		return 0;
 	}
 
 	chip->mmchip.gc.to_irq = xgpio_to_irq;
 
-	chip->irq_base = irq_alloc_descs(-1, 0, chip->mmchip.gc.ngpio, 0);
+	chip->irq_base = irq_alloc_descs(-1, 1, chip->mmchip.gc.ngpio, 0);
 	if (chip->irq_base < 0) {
 		pr_err("Couldn't allocate IRQ numbers\n");
 		return -1;
@@ -601,7 +604,7 @@ static int xgpio_of_probe(struct platform_device *pdev)
 	struct xgpio_instance *chip, *chip_dual;
 	int status = 0;
 	const u32 *tree_info;
-	u32 ngpio;
+	u32 ngpio = 0;
 	u32 cells = 2;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
@@ -609,18 +612,21 @@ static int xgpio_of_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* Update GPIO state shadow register with default value */
-	of_property_read_u32(np, "xlnx,dout-default", &chip->gpio_state);
+	if (of_property_read_u32(np, "xlnx,dout-default", &chip->gpio_state))
+		dev_dbg(&pdev->dev, "Missing xlnx,dout-default property\n");
 
 	/* By default, all pins are inputs */
 	chip->gpio_dir = 0xFFFFFFFF;
 
 	/* Update GPIO direction shadow register with default value */
-	of_property_read_u32(np, "xlnx,tri-default", &chip->gpio_dir);
+	if (of_property_read_u32(np, "xlnx,tri-default", &chip->gpio_dir))
+		dev_dbg(&pdev->dev, "Missing xlnx,tri-default property\n");
 
 	chip->no_init = of_property_read_bool(np, "xlnx,no-init");
 
 	/* Update cells with gpio-cells value */
-	of_property_read_u32(np, "#gpio-cells", &cells);
+	if (of_property_read_u32(np, "#gpio-cells", &cells))
+		dev_dbg(&pdev->dev, "Missing gpio-cells property\n");
 
 	/*
 	 * Check device node and parent device node for device width
@@ -650,9 +656,9 @@ static int xgpio_of_probe(struct platform_device *pdev)
 
 	chip->clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
 	if (IS_ERR(chip->clk)) {
-		if ((PTR_ERR(chip->clk) != -ENOENT) ||
-				(PTR_ERR(chip->clk) != -EPROBE_DEFER)) {
-			dev_err(&pdev->dev, "Input clock not found\n");
+		if (PTR_ERR(chip->clk) != -ENOENT) {
+			if (PTR_ERR(chip->clk) != -EPROBE_DEFER)
+				dev_err(&pdev->dev, "Input clock not found\n");
 			return PTR_ERR(chip->clk);
 		}
 
@@ -782,19 +788,7 @@ static struct platform_driver xilinx_gpio_driver = {
 	},
 };
 
-static int __init xgpio_init(void)
-{
-	return platform_driver_register(&xilinx_gpio_driver);
-}
-
-/* Make sure we get initialized before anyone else tries to use us */
-subsys_initcall(xgpio_init);
-
-static void __exit xgpio_exit(void)
-{
-	platform_driver_unregister(&xilinx_gpio_driver);
-}
-module_exit(xgpio_exit);
+module_platform_driver(xilinx_gpio_driver);
 
 MODULE_AUTHOR("Xilinx, Inc.");
 MODULE_DESCRIPTION("Xilinx GPIO driver");

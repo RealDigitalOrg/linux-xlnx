@@ -654,10 +654,11 @@ static int ulite_assign(struct device *dev, int id, u32 base, int irq,
 static int ulite_release(struct device *dev)
 {
 	struct uart_port *port = dev_get_drvdata(dev);
-	struct uartlite_data *pdata = port->private_data;
 	int rc = 0;
 
 	if (port) {
+		struct uartlite_data *pdata = port->private_data;
+
 		rc = uart_remove_one_port(pdata->ulite_uart_driver, port);
 		dev_set_drvdata(dev, NULL);
 		port->mapbase = 0;
@@ -675,10 +676,12 @@ static int ulite_release(struct device *dev)
 static int __maybe_unused ulite_suspend(struct device *dev)
 {
 	struct uart_port *port = dev_get_drvdata(dev);
-	struct uartlite_data *pdata = port->private_data;
 
-	if (port)
+	if (port) {
+		struct uartlite_data *pdata = port->private_data;
+
 		uart_suspend_port(pdata->ulite_uart_driver, port);
+	}
 
 	return 0;
 }
@@ -692,10 +695,12 @@ static int __maybe_unused ulite_suspend(struct device *dev)
 static int __maybe_unused ulite_resume(struct device *dev)
 {
 	struct uart_port *port = dev_get_drvdata(dev);
-	struct uartlite_data *pdata = port->private_data;
 
-	if (port)
+	if (port) {
+		struct uartlite_data *pdata = port->private_data;
+
 		uart_resume_port(pdata->ulite_uart_driver, port);
+	}
 
 	return 0;
 }
@@ -950,11 +955,12 @@ err_out_clk_disable:
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 err_out_unregister_driver:
-	uart_unregister_driver(pdata->ulite_uart_driver);
+	uart_unregister_driver(ulite_uart_driver);
 err_out_id:
 	mutex_lock(&bitmap_lock);
 	clear_bit(pdata->id, bitmap);
 	mutex_unlock(&bitmap_lock);
+
 	return ret;
 }
 
@@ -1001,6 +1007,7 @@ static struct platform_driver ulite_platform_driver = {
 
 static int __init ulite_init(void)
 {
+
 	pr_debug("uartlite: calling platform_driver_register()\n");
 	return platform_driver_register(&ulite_platform_driver);
 }

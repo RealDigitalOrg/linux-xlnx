@@ -632,7 +632,7 @@ top:
 		dev_dbg(udc->dev, "read %s, %d bytes%s req %p %d/%d\n",
 			ep->ep_usb.name, count, is_short ? "/S" : "", req,
 			req->usb_req.actual, req->usb_req.length);
-		bufferspace -= count;
+
 		/* Completion */
 		if ((req->usb_req.actual == req->usb_req.length) || is_short) {
 			if (udc->dma_enabled && req->usb_req.length)
@@ -1081,7 +1081,7 @@ static int xudc_ep_queue(struct usb_ep *_ep, struct usb_request *_req,
 	unsigned long flags;
 
 	if (!ep->desc) {
-		dev_dbg(udc->dev, "%s:queing request to disabled %s\n",
+		dev_dbg(udc->dev, "%s: queuing request to disabled %s\n",
 			__func__, ep->name);
 		return -ESHUTDOWN;
 	}
@@ -2076,10 +2076,8 @@ static int xudc_probe(struct platform_device *pdev)
 		return PTR_ERR(udc->addr);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "unable to get irq\n");
+	if (irq < 0)
 		return irq;
-	}
 	ret = devm_request_irq(&pdev->dev, irq, xudc_irq, 0,
 			       dev_name(&pdev->dev), udc);
 	if (ret < 0) {
@@ -2206,10 +2204,14 @@ static int xudc_resume(struct device *dev)
 	struct xusb_udc *udc;
 	u32 crtlreg;
 	unsigned long flags;
+	int ret;
 
 	udc = dev_get_drvdata(dev);
 
-	clk_enable(udc->clk);
+	ret = clk_enable(udc->clk);
+	if (ret < 0)
+		return ret;
+
 	spin_lock_irqsave(&udc->lock, flags);
 
 	crtlreg = udc->read_fn(udc->addr + XUSB_CONTROL_OFFSET);

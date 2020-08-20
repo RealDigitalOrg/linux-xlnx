@@ -1,7 +1,8 @@
 Xilinx VPSS Color Space Converter (CSC)
 -----------------------------------------
 The Xilinx VPSS Color Space Converter (CSC) is a Video IP that supports
-color space conversion from RGB input to YUV output.
+color space conversion from RGB or YUV(444, 422, 420)input to RGB or
+YUV(444, 422, 420) output.
 
 Required properties:
 
@@ -10,6 +11,12 @@ Required properties:
 - reg: Physical base address and length of the registers set for the device.
 
 - clocks: Reference to the clock that drives the ap_clk signal.
+
+- xlnx,max-height: Maximum number of lines.
+  Valid range from 64 to 4320.
+
+- xlnx,max-width: Maximum number of pixels in a line.
+  Valid range from 64 to 8192.
 
 - reset-gpios: Specifier for a GPIO that assert VPSS CSC (AP_RST_N) reset.
 
@@ -24,17 +31,14 @@ Required port properties:
 
 - xlnx,video-width: Video width as defined in video.txt. Must be either 8 or 10.
 
-Optional properties:
-
-- xlnx,max-height: Maximum number of lines.
-- xlnx,max-width: Maximum number of pixels in a line.
-
 Example:
 	csc_1:csc@a0040000 {
 		compatible = "xlnx,v-vpss-csc";
 		reg = <0x0 0xa0040000 0x0 0x10000>;
 		clocks = <&vid_stream_clk>;
 		reset-gpios = <&gpio 84 1>;
+		xlnx,max-width = <3840>;
+		xlnx,max-height = <2160>;
 
 		ports {
 			#address-cells = <1>;

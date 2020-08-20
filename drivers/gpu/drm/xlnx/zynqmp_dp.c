@@ -23,6 +23,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_dp_helper.h>
 #include <drm/drm_of.h>
+#include <drm/drm_probe_helper.h>
 
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -35,6 +36,7 @@
 #include <linux/uaccess.h>
 
 #include "zynqmp_disp.h"
+#include "zynqmp_dp.h"
 #include "zynqmp_dpsub.h"
 
 static uint zynqmp_dp_aux_timeout_ms = 50;
@@ -46,7 +48,7 @@ MODULE_PARM_DESC(aux_timeout_ms, "DP aux timeout value in msec (default: 50)");
  */
 static uint zynqmp_dp_power_on_delay_ms = 4;
 module_param_named(power_on_delay_ms, zynqmp_dp_power_on_delay_ms, uint, 0444);
-MODULE_PARM_DESC(aux_timeout_ms, "DP power on delay in msec (default: 4)");
+MODULE_PARM_DESC(power_on_delay_ms, "DP power on delay in msec (default: 4)");
 
 /* Link configuration registers */
 #define ZYNQMP_DP_TX_LINK_BW_SET			0x0
@@ -489,7 +491,7 @@ static int zynqmp_dp_init_phy(struct zynqmp_dp *dp)
 		zynqmp_dp_write(dp->iomem, ZYNQMP_DP_SUB_TX_INTR_DS,
 				ZYNQMP_DP_TX_INTR_ALL);
 		zynqmp_dp_clr(dp->iomem, ZYNQMP_DP_TX_PHY_CONFIG,
-				ZYNQMP_DP_TX_PHY_CONFIG_ALL_RESET);
+			      ZYNQMP_DP_TX_PHY_CONFIG_ALL_RESET);
 		ret = xpsgtr_wait_pll_lock(dp->phy[0]);
 		if (ret) {
 			dev_err(dp->dev, "failed to lock pll\n");
@@ -607,34 +609,37 @@ static int zynqmp_dp_mode_configure(struct zynqmp_dp *dp, int pclock,
 				    u8 current_bw)
 {
 	int max_rate = dp->link_config.max_rate;
-	u8 bws[3] = { DP_LINK_BW_1_62, DP_LINK_BW_2_7, DP_LINK_BW_5_4 };
+	u8 bw_code;
 	u8 max_lanes = dp->link_config.max_lanes;
 	u8 max_link_rate_code = drm_dp_link_rate_to_bw_code(max_rate);
 	u8 bpp = dp->config.bpp;
 	u8 lane_cnt;
-	s8 i;
 
-	if (current_bw == DP_LINK_BW_1_62) {
+	/* Downshift from current bandwidth */
+	switch (current_bw) {
+	case DP_LINK_BW_5_4:
+		bw_code = DP_LINK_BW_2_7;
+		break;
+	case DP_LINK_BW_2_7:
+		bw_code = DP_LINK_BW_1_62;
+		break;
+	case DP_LINK_BW_1_62:
 		dev_err(dp->dev, "can't downshift. already lowest link rate\n");
 		return -EINVAL;
-	}
-
-	for (i = ARRAY_SIZE(bws) - 1; i >= 0; i--) {
-		if (current_bw && bws[i] >= current_bw)
-			continue;
-
-		if (bws[i] <= max_link_rate_code)
-			break;
+	default:
+		/* If not given, start with max supported */
+		bw_code = max_link_rate_code;
+		break;
 	}
 
 	for (lane_cnt = 1; lane_cnt <= max_lanes; lane_cnt <<= 1) {
 		int bw;
 		u32 rate;
 
-		bw = drm_dp_bw_code_to_link_rate(bws[i]);
+		bw = drm_dp_bw_code_to_link_rate(bw_code);
 		rate = zynqmp_dp_max_rate(bw, lane_cnt, bpp);
 		if (pclock <= rate) {
-			dp->mode.bw_code = bws[i];
+			dp->mode.bw_code = bw_code;
 			dp->mode.lane_cnt = lane_cnt;
 			dp->mode.pclock = pclock;
 			return dp->mode.bw_code;
@@ -1366,11 +1371,17 @@ zynqmp_dp_connector_detect(struct drm_connector *connector, bool force)
 	}
 
 	if (state & ZYNQMP_DP_TX_INTR_SIGNAL_STATE_HPD) {
+		dp->status = connector_status_connected;
 		ret = drm_dp_dpcd_read(&dp->aux, 0x0, dp->dpcd,
 				       sizeof(dp->dpcd));
 		if (ret < 0) {
-			dev_dbg(dp->dev, "DPCD read failes");
-			goto disconnected;
+			dev_dbg(dp->dev, "DPCD read first try fails");
+			ret = drm_dp_dpcd_read(&dp->aux, 0x0, dp->dpcd,
+					       sizeof(dp->dpcd));
+			if (ret < 0) {
+				dev_dbg(dp->dev, "DPCD read retry fails");
+				goto disconnected;
+			}
 		}
 
 		link_config->max_rate = min_t(int,
@@ -1380,7 +1391,6 @@ zynqmp_dp_connector_detect(struct drm_connector *connector, bool force)
 					       drm_dp_max_lane_count(dp->dpcd),
 					       dp->num_lanes);
 
-		dp->status = connector_status_connected;
 		return connector_status_connected;
 	}
 
@@ -1455,7 +1465,6 @@ zynqmp_dp_connector_atomic_set_property(struct drm_connector *connector,
 					uint64_t val)
 {
 	struct zynqmp_dp *dp = connector_to_dp(connector);
-	int ret;
 
 	if (property == dp->sync_prop) {
 		zynqmp_dp_set_sync_mode(dp, val);
@@ -1466,7 +1475,7 @@ zynqmp_dp_connector_atomic_set_property(struct drm_connector *connector,
 		if (bpc) {
 			drm_object_property_set_value(&connector->base,
 						      property, bpc);
-			ret = -EINVAL;
+			return -EINVAL;
 		}
 	} else {
 		return -EINVAL;
@@ -1705,13 +1714,14 @@ int zynqmp_dp_bind(struct device *dev, struct device *master, void *data)
 				   ret ? ret : 8);
 	zynqmp_dp_update_bpp(dp);
 
+	INIT_DELAYED_WORK(&dp->hpd_work, zynqmp_dp_hpd_work_func);
+
 	/* This enables interrupts, so should be called after DRM init */
 	ret = zynqmp_dp_init_aux(dp);
 	if (ret) {
 		dev_err(dp->dev, "failed to initialize DP aux");
 		goto error_prop;
 	}
-	INIT_DELAYED_WORK(&dp->hpd_work, zynqmp_dp_hpd_work_func);
 
 	return 0;
 
